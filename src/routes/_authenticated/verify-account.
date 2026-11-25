@@ -1,0 +1,266 @@
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useState, useEffect } from "react";
+import { toast } from "sonner";
+import {
+  Loader2,
+  ArrowLeft,
+  Mail,
+  ShieldCheck,
+  RefreshCw,
+  CheckCircle2,
+} from "lucide-react";
+import { useAuth } from "@/hooks/use-auth";
+import { supabase } from "@/lib/supabase";
+import { callEdgeFunction } from "@/lib/edge-function";
+
+export const Route = createFileRoute("/_authenticated/verify-account")({
+  head: () => ({ meta: [{ title: "Verify Account — VevuPay" }] }),
+  component: VerifyAccountPage,
+});
+
+function VerifyAccountPage() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+
+  const [loading, setLoading] = useState(false);
+  const [fetching, setFetching] = useState(true);
+  const [isVerified, setIsVerified] = useState(false);
+  const [otpCode, setOtpCode] = useState("");
+  const [resendSeconds, setResendSeconds] = useState(0);
+
+  useEffect(() => {
+    if (resendSeconds <= 0) return;
+
+    const timer = window.setInterval(() => {
+      setResendSeconds((current) => Math.max(0, current - 1));
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [resendSeconds > 0]);
+
+  const formatCountdown = () => {
+    const minutes = Math.floor(resendSeconds / 60);
+    const seconds = resendSeconds % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  };
+
+  // Check verification status on mount
+  useEffect(() => {
+    const checkVerificationStatus = async () => {
+      if (!user) {
+        setFetching(false);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("is_verified")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error("Profile fetch error:", error);
+        toast.error("Unable to load verification status");
+        setFetching(false);
+        return;
+      }
+
+      if (data?.is_verified) {
+        setIsVerified(true);
+        // Already verified, redirect to dashboard
+        navigate({ to: "/dashboard", replace: true });
+      }
+
+      setFetching(false);
+    };
+
+    checkVerificationStatus();
+  }, [user, navigate]);
+
+  const sendVerificationOTP = async () => {
+    if (!user?.email) {
+      toast.error("Account email not found. Please sign in again.");
+      return;
+    }
+
+    if (loading || resendSeconds > 0) return;
+
+    setLoading(true);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("send-otp", {
+        body: {
+          email: user.email,
+          purpose: "signup_verification",
+        },
+      });
+
+      if (error) throw new Error(error.message);
+      if (data?.success === false) throw new Error(data.error || "Failed to send code");
+
+      setResendSeconds(60);
+      toast.success("Verification code sent to your email address!");
+    } catch (err: any) {
+      console.error("Send OTP error:", err);
+      toast.error(err.message || "Could not send verification code");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyAccount = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+
+    if (!/^\d{6}$/.test(otpCode)) {
+      toast.error("Enter the complete six-digit verification code");
+      return;
+    }
+
+    if (!user?.email) {
+      toast.error("Account email not found");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("verify-otp", {
+        body: {
+          email: user.email.trim().toLowerCase(),
+          otpCode,
+          purpose: "signup_verification",
+        },
+      });
+
+      if (error) throw new Error(error.message);
+      if (data?.success === false) throw new Error(data.error || "Verification failed");
+
+      setIsVerified(true);
+      toast.success("Account successfully verified!");
+      navigate({ to: "/dashboard", replace: true });
+    } catch (err: any) {
+      console.error("Verification error:", err);
+      toast.error(err.message || "Invalid or expired verification code");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (fetching) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  if (isVerified) {
+    return (
+      <div className="mx-auto max-w-lg px-4 py-12 text-center">
+        <CheckCircle2 className="mx-auto mb-4 h-12 w-12 text-green-500" />
+        <h1 className="text-2xl font-bold">Account is Verified</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Your account is fully verified. Redirecting to dashboard...
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-lg px-4 py-6">
+      <button
+        onClick={() => navigate({ to: "/dashboard" })}
+        className="mb-6 flex items-center gap-2 text-sm text-muted-foreground transition hover:text-foreground"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        Back to Dashboard
+      </button>
+
+      <div className="mb-6">
+        <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-primary/10">
+          <Mail className="h-7 w-7 text-primary" />
+        </div>
+
+        <h1 className="mb-2 text-2xl font-bold">Verify Your Account</h1>
+        <p className="text-sm text-muted-foreground">
+          Your account requires email verification. Request a code below and enter it to unlock full access to VevuPay.
+        </p>
+      </div>
+
+      <div className="mb-6 rounded-lg border border-primary/20 bg-primary/10 p-3 text-center">
+        <p className="text-sm font-bold text-foreground">
+          Didn't receive it? Check Your Spam folder.
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Sometimes verification emails are filtered into Spam or Junk.
+        </p>
+      </div>
+
+      <form onSubmit={handleVerifyAccount} className="space-y-5">
+        <div>
+          <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+            Email verification code
+          </label>
+
+          <input
+            type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            value={otpCode}
+            onChange={(e) =>
+              setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+            }
+            className="input-field font-mono text-center text-2xl tracking-[0.7em]"
+            placeholder="000000"
+            required
+            autoFocus
+          />
+
+          <p className="mt-2 text-xs text-muted-foreground">
+            Codes expire after 10 minutes.
+          </p>
+        </div>
+
+        <button
+          type="submit"
+          disabled={loading || otpCode.length !== 6}
+          className="btn-primary flex w-full items-center justify-center py-3 disabled:opacity-50"
+        >
+          {loading ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Verifying...
+            </>
+          ) : (
+            <>
+              <ShieldCheck className="mr-2 h-4 w-4" />
+              Verify Account
+            </>
+          )}
+        </button>
+
+        <button
+          type="button"
+          disabled={loading || resendSeconds > 0}
+          onClick={sendVerificationOTP}
+          className="w-full text-sm font-semibold text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {loading ? (
+            <span className="inline-flex items-center justify-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Sending code...
+            </span>
+          ) : resendSeconds > 0 ? (
+            `Resend code in ${formatCountdown()}`
+          ) : (
+            <span className="inline-flex items-center justify-center gap-2">
+              <RefreshCw className="h-4 w-4" />
+              Send verification code
+            </span>
+          )}
+        </button>
+      </form>
+    </div>
+  );
+}
