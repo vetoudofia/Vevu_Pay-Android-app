@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "715247455572",
+    "project_id": "vevu-pay",
+    "storage_bucket": "vevu-pay.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:715247455572:android:50075a50ba82a3b26c8cc1",
+        "android_client_info": {
+          "package_name": "com.webapp.vevupay"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB4oEXOs5mTF56pMl9beWCiRZQ306DDJW0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
