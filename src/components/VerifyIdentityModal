@@ -1,0 +1,95 @@
+// src/components/VerifyIdentityModal.tsx
+import { useState } from "react";
+import { X } from "lucide-react";
+
+interface VerifyIdentityModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onVerify: (method: string, code: string) => void;
+  availableMethods: string[];
+}
+
+export function VerifyIdentityModal({
+  isOpen,
+  onClose,
+  onVerify,
+  availableMethods,
+}: VerifyIdentityModalProps) {
+  const [selectedMethod, setSelectedMethod] = useState<string>(availableMethods[0] || "security");
+  const [code, setCode] = useState("");
+
+  if (!isOpen) return null;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (code.trim()) {
+      onVerify(selectedMethod, code);
+      setCode("");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <div className="bg-background rounded-2xl p-6 max-w-md w-full mx-4 shadow-xl border border-border">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-bold">Verify Identity</h2>
+          <button
+            onClick={onClose}
+            className="p-1 rounded-lg hover:bg-secondary transition"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <p className="text-sm text-muted-foreground mb-4">
+          Verify your identity to continue with this action.
+        </p>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {availableMethods.length > 1 && (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                Verification Method
+              </label>
+              <select
+                value={selectedMethod}
+                onChange={(e) => setSelectedMethod(e.target.value)}
+                className="input-field"
+              >
+                {availableMethods.map((method) => (
+                  <option key={method} value={method}>
+                    {method === "2fa" ? "🔐 2FA Code" : "❓ Security Question"}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {selectedMethod === "2fa" ? "Enter 2FA Code" : "Enter Your Security Answer"}
+            </label>
+            <input
+              type={selectedMethod === "2fa" ? "text" : "text"}
+              inputMode={selectedMethod === "2fa" ? "numeric" : "text"}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              className="input-field"
+              placeholder={selectedMethod === "2fa" ? "123456" : "Your answer"}
+              maxLength={selectedMethod === "2fa" ? 6 : undefined}
+              autoFocus
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={!code.trim() || (selectedMethod === "2fa" && code.length !== 6)}
+            className="btn-primary w-full py-3 disabled:opacity-50"
+          >
+            Verify
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
