@@ -1,0 +1,239 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand-cyan: var(--brand-cyan);
+  --color-brand-green: var(--brand-green);
+  --color-brand-blue: var(--brand-blue);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+}
+
+/* Dark-first: default (root) IS the dark navy theme.
+   .light class opts into a lighter surface. */
+:root {
+  --radius: 0.75rem;
+
+  --background: oklch(0.16 0.04 260);
+  --foreground: oklch(0.98 0.005 240);
+
+  --card: oklch(0.22 0.045 262);
+  --card-foreground: oklch(0.98 0.005 240);
+
+  --popover: oklch(0.22 0.045 262);
+  --popover-foreground: oklch(0.98 0.005 240);
+
+  --primary: oklch(0.72 0.16 200);
+  --primary-foreground: oklch(0.14 0.04 260);
+
+  --secondary: oklch(0.28 0.05 260);
+  --secondary-foreground: oklch(0.98 0.005 240);
+
+  --muted: oklch(0.26 0.04 260);
+  --muted-foreground: oklch(0.72 0.03 250);
+
+  --accent: oklch(0.78 0.17 165);
+  --accent-foreground: oklch(0.14 0.04 260);
+
+  --destructive: oklch(0.62 0.23 25);
+  --destructive-foreground: oklch(0.98 0.005 240);
+
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.72 0.16 200);
+
+  --brand-cyan: oklch(0.75 0.16 220);
+  --brand-blue: oklch(0.62 0.20 255);
+  --brand-green: oklch(0.78 0.17 165);
+  --success: oklch(0.72 0.17 160);
+  --warning: oklch(0.82 0.16 85);
+}
+
+.light {
+  --background: oklch(0.99 0.003 240);
+  --foreground: oklch(0.18 0.04 260);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.18 0.04 260);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.18 0.04 260);
+  --primary: oklch(0.55 0.18 220);
+  --primary-foreground: oklch(0.99 0.003 240);
+  --secondary: oklch(0.95 0.01 240);
+  --secondary-foreground: oklch(0.22 0.04 260);
+  --muted: oklch(0.96 0.008 240);
+  --muted-foreground: oklch(0.50 0.03 250);
+  --accent: oklch(0.62 0.17 165);
+  --accent-foreground: oklch(0.99 0.003 240);
+  --border: oklch(0.20 0.04 260 / 12%);
+  --input: oklch(0.20 0.04 260 / 14%);
+  --ring: oklch(0.55 0.18 220);
+}
+
+@layer base {
+  * { border-color: var(--color-border); }
+  html, body { background-color: var(--color-background); color: var(--color-foreground); }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@utility bg-brand-gradient {
+  background-image: linear-gradient(135deg, var(--brand-blue) 0%, var(--brand-cyan) 45%, var(--brand-green) 100%);
+}
+@utility text-brand-gradient {
+  background-image: linear-gradient(135deg, var(--brand-blue) 0%, var(--brand-cyan) 45%, var(--brand-green) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+@utility card-elevated {
+  background-color: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 8px 30px -12px oklch(0 0 0 / 0.5);
+}
+@utility surface {
+  background-color: color-mix(in oklab, var(--card) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  backdrop-filter: blur(8px);
+}
+@utility btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border-radius: var(--radius);
+  background-image: linear-gradient(135deg, var(--brand-blue) 0%, var(--brand-cyan) 45%, var(--brand-green) 100%);
+  color: var(--primary-foreground);
+  box-shadow: 0 10px 25px -12px color-mix(in oklab, var(--brand-blue) 60%, transparent);
+  transition: transform 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease;
+}
+@utility btn-primary {
+  &:hover:not(:disabled) { opacity: 0.94; transform: translateY(-1px); }
+  &:active:not(:disabled) { transform: translateY(0); }
+  &:disabled { opacity: 0.55; cursor: not-allowed; }
+}
+@utility btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border-radius: var(--radius);
+  background-color: color-mix(in oklab, var(--secondary) 70%, transparent);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  transition: background-color 0.15s ease;
+}
+@utility btn-secondary {
+  &:hover:not(:disabled) { background-color: var(--secondary); }
+  &:disabled { opacity: 0.55; cursor: not-allowed; }
+}
+@utility btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  border-radius: var(--radius);
+  color: var(--muted-foreground);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+@utility btn-ghost {
+  &:hover { background-color: color-mix(in oklab, var(--secondary) 60%, transparent); color: var(--foreground); }
+}
+@utility input-field {
+  width: 100%;
+  border-radius: var(--radius);
+  border: 1px solid var(--input);
+  background-color: color-mix(in oklab, var(--background) 40%, transparent);
+  padding: 0.75rem 0.9rem;
+  font-size: 0.9375rem;
+  color: var(--foreground);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+@utility input-field {
+  &::placeholder { color: color-mix(in oklab, var(--muted-foreground) 80%, transparent); }
+  &:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 30%, transparent); }
+}
+@utility chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 9999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+@utility divider-soft {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--border) 100%, transparent), transparent);
+}
+
+
+/* Native Android shell refinements (Capacitor only). */
+.native-app,
+.native-app body {
+  min-height: 100%;
+  overscroll-behavior-y: contain;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.native-app #root {
+  min-height: 100dvh;
+}
+
+.native-app .vevupay-app-shell {
+  min-height: 100dvh;
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.native-app .vevupay-app-content {
+  padding-bottom: calc(7.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+.native-app .vevupay-bottom-nav {
+  padding-bottom: max(0.35rem, env(safe-area-inset-bottom, 0px));
+}
+
+.native-app button,
+.native-app a {
+  touch-action: manipulation;
+}
