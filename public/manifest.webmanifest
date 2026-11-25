@@ -1,0 +1,18 @@
+{
+  "name": "VevuPay",
+  "short_name": "VevuPay",
+  "description": "Pay bills, top up airtime & data, buy exam pins, fund betting wallets, and more.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a1128",
+  "theme_color": "#0a1128",
+  "categories": ["finance", "utilities"],
+  "icons": [
+    { "src": "/vevupay-icon.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/vevupay-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/vevupay-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
