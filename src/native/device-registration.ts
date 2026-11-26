@@ -24,7 +24,7 @@ function storeDeviceId(deviceId: string): void {
   }
 }
 
-async function getPersistentDeviceId(): Promise<string> {
+export async function getPersistentDeviceId(): Promise<string> {
   const stored = getStoredDeviceId();
   if (stored && stored.length <= 128) return stored;
 
