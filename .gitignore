@@ -48,3 +48,5 @@ release-signing.properties
 
 # Mobile build output
 dist-mobile/
+android/keystore.properties
+android/app/vevupay-upload-key.jks
