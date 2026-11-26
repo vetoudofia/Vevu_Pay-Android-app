@@ -18,6 +18,7 @@ import { AuthProvider, useAuth } from "@/hooks/use-auth";
 import { TopProgressBar } from "@/components/TopProgressBar";
 import { supabase } from "@/lib/supabase";
 import { MaintenanceScreen } from "@/components/MaintenanceScreen";
+import { AppReleaseManager } from "@/native/app-release-manager";
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -333,6 +334,7 @@ function RootComponent() {
         <AuthProvider>
           <AppErrorBoundary>
             <AppContent />
+            <AppReleaseManager />
           </AppErrorBoundary>
         </AuthProvider>
       </ThemeProvider>
