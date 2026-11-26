@@ -30,7 +30,9 @@ jobs:
           java-version: '21'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0 platform-tools'
 
       - name: Configure public app environment
         env:
@@ -99,8 +101,12 @@ jobs:
         run: |
           BUILD_TOOLS_VERSION=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)
           APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner"
-          "$APKSIGNER" verify --verbose --print-certs android/app/build/outputs/apk/release/app-release.apk
-          jarsigner -verify -verbose -certs android/app/build/outputs/bundle/release/app-release.aab
+
+          "$APKSIGNER" verify --verbose --print-certs \
+            android/app/build/outputs/apk/release/app-release.apk
+
+          jarsigner -verify -verbose -certs \
+            android/app/build/outputs/bundle/release/app-release.aab
 
       - name: Upload signed Android build artifacts
         uses: actions/upload-artifact@v4
