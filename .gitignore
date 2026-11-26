@@ -50,3 +50,6 @@ release-signing.properties
 dist-mobile/
 android/keystore.properties
 android/app/vevupay-upload-key.jks
+
+# Temporary PKCS12 signing material
+*.p12
