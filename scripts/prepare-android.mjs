@@ -24,23 +24,40 @@ if (!gradle.includes("androidx.biometric:biometric")) {
   await writeFile(gradleFile, gradle);
 }
 
-// Add runtime biometric permission (idempotent).
+// Configure only the biometric permission required by the native plugin.
 // Biometric authentication does not require package-install permissions.
 let manifest = await readFile(manifestFile, "utf8");
 if (!manifest.includes("android.permission.USE_BIOMETRIC")) {
-  manifest = manifest.replace(/<manifest\b[^>]*>/, match => `${match}\n    <uses-permission android:name="android.permission.USE_BIOMETRIC" />`);
+  manifest = manifest.replace(
+    /<manifest\b[^>]*>/,
+    match => `${match}\n    <uses-permission android:name="android.permission.USE_BIOMETRIC" />`,
+  );
 }
 
-// VevuPay must not request permission to install APK packages as a self-update
-// mechanism. Google Play policy prohibits REQUEST_INSTALL_PACKAGES for app
-// self-updates. Remove any stale declaration left by an earlier updater patch.
+// Block REQUEST_INSTALL_PACKAGES even if a transitive Android library tries
+// to add it during manifest merging. VevuPay's Play-distribution updater must
+// open the Play Store listing; it must never sideload an APK itself.
+if (!/\bxmlns:tools\s*=/.test(manifest)) {
+  manifest = manifest.replace(
+    /<manifest\b/,
+    '<manifest xmlns:tools="http://schemas.android.com/tools"',
+  );
+}
+const removeInstallPermission =
+  '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" tools:node="remove" />';
+if (!manifest.includes(removeInstallPermission)) {
+  manifest = manifest.replace(
+    /<manifest\b[^>]*>/,
+    match => `${match}\n    ${removeInstallPermission}`,
+  );
+}
+
+// Remove direct declarations left by older scripts, but preserve the tools
+// removal marker above so Gradle's manifest merger also strips library requests.
 manifest = manifest.replace(
-  /\s*<uses-permission\b(?=[^>]*\bandroid:name\s*=\s*["'](?:android\.)?permission\.REQUEST_INSTALL_PACKAGES["'])[^>]*\/?>/g,
+  /\s*<uses-permission\b(?=[^>]*\bandroid:name\s*=\s*["']android\.permission\.REQUEST_INSTALL_PACKAGES["'])(?![^>]*\btools:node\s*=\s*["']remove["'])[^>]*\/?>/g,
   "",
 );
-if (manifest.includes("android.permission.REQUEST_INSTALL_PACKAGES")) {
-  throw new Error("Unsafe REQUEST_INSTALL_PACKAGES permission remains in AndroidManifest.xml.");
-}
 await writeFile(manifestFile, manifest);
 
 
