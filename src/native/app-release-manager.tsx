@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { App } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, registerPlugin, type PluginListenerHandle } from "@capacitor/core";
 import { Device } from "@capacitor/device";
 import { useAuth } from "@/hooks/use-auth";
 import { supabase } from "@/lib/supabase";
 import { getPersistentDeviceId } from "@/native/device-registration";
+
+type NativeUpdaterPlugin = {
+  downloadApk(options: { url: string; sha256?: string | null; versionCode: number }): Promise<{ path: string; sizeBytes: number; sha256: string }>;
+  installApk(options: { path: string }): Promise<void>;
+  cleanupDownloads(): Promise<void>;
+  addListener(eventName: "downloadProgress", listenerFunc: (progress: { bytesDownloaded: number; totalBytes: number; percent: number }) => void): Promise<PluginListenerHandle>;
+};
+
+const NativeUpdater = registerPlugin<NativeUpdaterPlugin>("VevuPayUpdater");
 
 type Release = {
   id: string;
@@ -71,6 +80,9 @@ export function AppReleaseManager() {
   const [mandatory, setMandatory] = useState(false);
   const [checking, setChecking] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const [downloadStatus, setDownloadStatus] = useState<"idle" | "downloading" | "installing">("idle");
+  const [downloadBytes, setDownloadBytes] = useState({ downloaded: 0, total: 0 });
   const [dismissedReleaseId, setDismissedReleaseId] = useState<string | null>(null);
   const currentVersionCodeRef = useRef(FALLBACK_VERSION_CODE);
   const checkInFlightRef = useRef(false);
@@ -135,6 +147,7 @@ export function AppReleaseManager() {
       const deviceId = await getPersistentDeviceId();
       await recordDownloadEvent(pending, "completed", versionCode, deviceId);
       window.localStorage.removeItem(PENDING_DOWNLOAD_KEY);
+      await NativeUpdater.cleanupDownloads().catch(() => undefined);
     } catch {
       // Keep the pending record and retry on the next app activation.
     }
@@ -156,15 +169,7 @@ export function AppReleaseManager() {
         },
       });
       if (error) throw error;
-      // Never present an APK whose version is already installed. This also
-      // protects users if stale release metadata is returned by the API.
-      if (
-        data?.success &&
-        data.update_available &&
-        data.release &&
-        Number.isSafeInteger(data.release.version_code) &&
-        data.release.version_code > appInfo.versionCode
-      ) {
+      if (data?.success && data.update_available && data.release) {
         setDismissedReleaseId((previous) => previous === data.release?.id ? previous : null);
         setRelease(data.release);
         setMandatory(data.mandatory_update === true);
@@ -188,6 +193,9 @@ export function AppReleaseManager() {
     let listener: { remove: () => Promise<void> } | undefined;
     void App.addListener("appStateChange", ({ isActive }) => {
       if (isActive) {
+        // Android's package installer may have been cancelled or returned control.
+        // Allow the user to retry rather than leaving the update button disabled.
+        setDownloadStatus("idle");
         void checkForUpdate();
         if (user) void reportInstalledVersion().catch((error) => console.warn("Installed-version report failed", error));
       }
@@ -235,9 +243,34 @@ export function AppReleaseManager() {
         console.warn("Download request tracking failed", error);
       }
       window.localStorage.setItem(PENDING_DOWNLOAD_KEY, JSON.stringify(pending));
-      await Browser.open({ url, presentationStyle: "fullscreen" });
+      if (CHANNEL === "play") {
+        await Browser.open({ url, presentationStyle: "fullscreen" });
+        return;
+      }
+
+      setDownloadStatus("downloading");
+      setDownloadProgress(0);
+      setDownloadBytes({ downloaded: 0, total: release.file_size_bytes || 0 });
+      let progressListener: PluginListenerHandle | undefined;
+      try {
+        progressListener = await NativeUpdater.addListener("downloadProgress", (progress) => {
+          setDownloadProgress(progress.percent >= 0 ? progress.percent : null);
+          setDownloadBytes({ downloaded: progress.bytesDownloaded, total: progress.totalBytes || release.file_size_bytes || 0 });
+        });
+        const downloaded = await NativeUpdater.downloadApk({
+          url,
+          sha256: release.sha256,
+          versionCode: release.version_code,
+        });
+        setDownloadStatus("installing");
+        setDownloadProgress(100);
+        await NativeUpdater.installApk({ path: downloaded.path });
+      } finally {
+        await progressListener?.remove();
+      }
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Unable to open the update link.");
+      setActionError(error instanceof Error ? error.message : "Unable to download or install the update.");
+      setDownloadStatus("idle");
     }
   };
 
@@ -263,14 +296,30 @@ export function AppReleaseManager() {
           <span>Build {release.version_code}</span>
           {formatFileSize(release.file_size_bytes) && <span>{formatFileSize(release.file_size_bytes)}</span>}
         </div>
+        {downloadStatus !== "idle" && CHANNEL === "direct" && (
+          <div className="mt-5 rounded-2xl bg-white/5 p-4" aria-live="polite">
+            <div className="flex items-center justify-between text-sm font-semibold">
+              <span>{downloadStatus === "downloading" ? "Downloading update…" : "Opening secure installer…"}</span>
+              {downloadProgress !== null && <span>{downloadProgress}%</span>}
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+              <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${downloadProgress ?? 5}%` }} />
+            </div>
+            <p className="mt-2 text-xs text-slate-400">
+              {downloadBytes.total > 0
+                ? `${(downloadBytes.downloaded / 1048576).toFixed(1)} MB of ${(downloadBytes.total / 1048576).toFixed(1)} MB`
+                : `${(downloadBytes.downloaded / 1048576).toFixed(1)} MB downloaded`}
+            </p>
+          </div>
+        )}
         {actionError && <p role="alert" className="mt-4 text-sm text-rose-300">{actionError}</p>}
         <button
           type="button"
           onClick={() => void openUpdate()}
-          disabled={checking}
+          disabled={checking || downloadStatus !== "idle"}
           className="mt-6 w-full rounded-xl bg-blue-500 px-5 py-3.5 text-sm font-bold text-white transition hover:bg-blue-400 disabled:opacity-60"
         >
-          {checking ? "Checking…" : CHANNEL === "play" ? "Update in Google Play" : "Download update"}
+          {checking ? "Checking…" : downloadStatus === "downloading" ? "Downloading update…" : downloadStatus === "installing" ? "Opening installer…" : CHANNEL === "play" ? "Update in Google Play" : "Download update"}
         </button>
         {!mandatory && (
           <button
