@@ -11,7 +11,7 @@ const manifestFile = resolve(androidRoot, "app/src/main/AndroidManifest.xml");
 async function exists(path) { try { await access(path); return true; } catch { return false; } }
 if (!(await exists(androidRoot))) throw new Error("Android platform is missing. Run npx cap add android first.");
 await mkdir(javaTarget, { recursive: true });
-for (const file of ["MainActivity.java", "VevuPayBiometricPlugin.java"]) {
+for (const file of ["MainActivity.java", "VevuPayBiometricPlugin.java", "VevuPayUpdaterPlugin.java"]) {
   await copyFile(resolve(javaSource, file), resolve(javaTarget, file));
 }
 
@@ -24,6 +24,20 @@ if (!gradle.includes("androidx.biometric:biometric")) {
   await writeFile(gradleFile, gradle);
 }
 
+// Copy the private-storage FileProvider paths used by the native APK updater.
+const updaterXmlSource = resolve(root, "native/android/app/src/main/res/xml/vevupay_file_paths.xml");
+const updaterXmlTarget = resolve(androidRoot, "app/src/main/res/xml/vevupay_file_paths.xml");
+await mkdir(dirname(updaterXmlTarget), { recursive: true });
+await copyFile(updaterXmlSource, updaterXmlTarget);
+
+// Register a narrowly scoped FileProvider for APKs in the app-private cache directory.
+let updaterManifest = await readFile(manifestFile, "utf8");
+if (!updaterManifest.includes('android:name="androidx.core.content.FileProvider"')) {
+  const provider = `\n        <provider\n            android:name="androidx.core.content.FileProvider"\n            android:authorities="\${applicationId}.fileprovider"\n            android:exported="false"\n            android:grantUriPermissions="true">\n            <meta-data\n                android:name="android.support.FILE_PROVIDER_PATHS"\n                android:resource="@xml/vevupay_file_paths" />\n        </provider>`;
+  updaterManifest = updaterManifest.replace(/<application\b[^>]*>/, match => `${match}${provider}`);
+  await writeFile(manifestFile, updaterManifest);
+}
+
 // Add runtime biometric permission (idempotent).
 let manifest = await readFile(manifestFile, "utf8");
 if (!manifest.includes("android.permission.USE_BIOMETRIC")) {
@@ -32,29 +46,27 @@ if (!manifest.includes("android.permission.USE_BIOMETRIC")) {
 }
 
 
-// Apply the release identity used by the in-app updater. GitHub Actions writes
-// VITE_* values to .env.production.local in an earlier step; that file is NOT
-// automatically exported into later step processes. Read it here as a fallback.
-const productionEnvText = await readFile(resolve(root, ".env.production.local"), "utf8").catch(() => "");
-const productionEnv = Object.fromEntries(
-  productionEnvText.split(/\\r?\\n/).flatMap((line) => {
-    const match = line.match(/^\\s*(VITE_[A-Z0-9_]+)\\s*=\\s*(.*?)\\s*$/);
-    if (!match) return [];
-    let value = match[2];
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    return [[match[1], value]];
-  }),
-);
-const configured = (key, fallback) => process.env[key] || productionEnv[key] || fallback;
-
-// Always increment VITE_APP_VERSION_CODE for each Android release; Android forbids downgrading it.
-const versionName = configured("VITE_APP_VERSION", "1.0.0").trim();
-const versionCode = Number.parseInt(configured("VITE_APP_VERSION_CODE", "1"), 10);
+// Apply the release identity used by the in-app updater. Always increment
+// VITE_APP_VERSION_CODE for each Android release; Android forbids downgrading it.
+// GitHub Actions writes Vite variables to .env.production.local. Vite reads
+// that file automatically, but Node scripts do not, so load it explicitly.
+const productionEnvPath = resolve(root, ".env.production.local");
+let productionEnv = {};
+if (await exists(productionEnvPath)) {
+  const envText = await readFile(productionEnvPath, "utf8");
+  for (const line of envText.split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!match) continue;
+    let value = match[2].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    productionEnv[match[1]] = value;
+  }
+}
+const versionName = (process.env.VITE_APP_VERSION || productionEnv.VITE_APP_VERSION || "1.0.0").trim();
+const versionCode = Number.parseInt(process.env.VITE_APP_VERSION_CODE || productionEnv.VITE_APP_VERSION_CODE || "1", 10);
 if (!versionName || versionName.length > 40) throw new Error("VITE_APP_VERSION must contain 1-40 characters.");
 if (!Number.isSafeInteger(versionCode) || versionCode < 1) throw new Error("VITE_APP_VERSION_CODE must be a positive integer.");
-const distributionChannel = configured("VITE_DISTRIBUTION_CHANNEL", "direct");
+const distributionChannel = process.env.VITE_DISTRIBUTION_CHANNEL || productionEnv.VITE_DISTRIBUTION_CHANNEL || "direct";
 if (distributionChannel !== "direct" && distributionChannel !== "play") throw new Error("VITE_DISTRIBUTION_CHANNEL must be direct or play.");
 let versionGradle = await readFile(gradleFile, "utf8");
 if (!/versionCode\s+\d+/.test(versionGradle) || !/versionName\s+[\"']/.test(versionGradle)) {
@@ -68,4 +80,4 @@ await writeFile(gradleFile, versionGradle);
 const firebaseSource = resolve(root, "firebase/google-services.json");
 const firebaseTarget = resolve(androidRoot, "app/google-services.json");
 if (await exists(firebaseSource)) await copyFile(firebaseSource, firebaseTarget);
-console.log("VevuPay Android native source, biometric dependency, permission and Firebase config prepared.");
+console.log("VevuPay Android native source, biometric dependency, updater FileProvider, permission and Firebase config prepared.");
