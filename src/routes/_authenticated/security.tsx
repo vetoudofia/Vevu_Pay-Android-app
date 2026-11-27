@@ -130,13 +130,54 @@ async function getEdgeErrorMessage(
   return fallback;
 }
 
+async function ensureFreshSessionToken(): Promise<string> {
+  const { data: currentData } = await supabase.auth.getSession();
+  const currentSession = currentData?.session;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  if (
+    currentSession?.access_token &&
+    typeof currentSession.expires_at === "number" &&
+    currentSession.expires_at > nowSeconds + 60
+  ) {
+    return currentSession.access_token;
+  }
+
+  const { data: refreshed, error: refreshError } =
+    await supabase.auth.refreshSession();
+
+  if (!refreshError && refreshed?.session?.access_token) {
+    return refreshed.session.access_token;
+  }
+
+  if (currentSession?.access_token) {
+    return currentSession.access_token;
+  }
+
+  throw new Error("Your session is invalid or expired. Please sign in again.");
+}
+
 async function invokeEdgeFunction(
   functionName: string,
   body: Record<string, any>,
+  options?: { requireFreshToken?: boolean },
 ): Promise<any> {
-  const { data, error } = await supabase.functions.invoke(functionName, {
-    body,
-  });
+  const invokeOptions: {
+    body: Record<string, any>;
+    headers?: Record<string, string>;
+  } = { body };
+
+  if (options?.requireFreshToken) {
+    const accessToken = await ensureFreshSessionToken();
+    invokeOptions.headers = {
+      Authorization: `Bearer ${accessToken}`,
+    };
+  }
+
+  const { data, error } = await supabase.functions.invoke(
+    functionName,
+    invokeOptions,
+  );
 
   if (error) {
     const message = await getEdgeErrorMessage(
@@ -351,10 +392,14 @@ function SecurityPage() {
     }
 
     const [settingsResult, availability] = await Promise.all([
-      invokeEdgeFunction("device-management", {
-        action: "get_biometric_settings",
-        ...(currentDeviceId ? { device_id: currentDeviceId } : {}),
-      }),
+      invokeEdgeFunction(
+        "device-management",
+        {
+          action: "get_biometric_settings",
+          ...(currentDeviceId ? { device_id: currentDeviceId } : {}),
+        },
+        { requireFreshToken: true },
+      ),
       checkNativeBiometric().catch((error) => ({
         available: false,
         strongBiometry: false,
@@ -463,9 +508,13 @@ function SecurityPage() {
 
     setBiometricSubmitting(true);
     try {
-      const data = await invokeEdgeFunction("send-otp", {
-        purpose: "biometric_settings_change",
-      });
+      const data = await invokeEdgeFunction(
+        "send-otp",
+        {
+          purpose: "biometric_settings_change",
+        },
+        { requireFreshToken: true },
+      );
 
       requireSuccess(data, "Could not send verification code.");
       setBiometricOtpCode("");
@@ -560,7 +609,6 @@ function SecurityPage() {
     setBiometricAccountPassword("");
     setBiometricOtpCode("");
 
-    // If this device doesn't have an enrolled ECDSA public key yet, enroll it first.
     if (!biometricSettings?.device_has_key) {
       setBiometricFlowStep("enroll_key");
       return;
@@ -582,12 +630,15 @@ function SecurityPage() {
 
     setBiometricSubmitting(true);
     try {
-      // 1. Issue enrollment challenge (verifies current password)
-      const challengeRes = await invokeEdgeFunction("device-management", {
-        action: "issue_key_challenge",
-        device_id: deviceId,
-        current_password: biometricAccountPassword,
-      });
+      const challengeRes = await invokeEdgeFunction(
+        "device-management",
+        {
+          action: "issue_key_challenge",
+          device_id: deviceId,
+          current_password: biometricAccountPassword,
+        },
+        { requireFreshToken: true },
+      );
 
       requireSuccess(challengeRes, "Could not start key enrollment.");
 
@@ -606,7 +657,6 @@ function SecurityPage() {
           challengeRes.challenge,
         ].join("\n");
 
-      // 2. Prompt Android BiometricPrompt + generate Keystore ECDSA P-256 key & sign
       const enrolled = await enrollBiometricKey({
         challengeId: challengeRes.challenge_id,
         challenge: challengeRes.challenge,
@@ -614,15 +664,18 @@ function SecurityPage() {
         deviceId,
       });
 
-      // 3. Register public key on backend
-      const registerKeyRes = await invokeEdgeFunction("device-management", {
-        action: "enroll_public_key",
-        device_id: deviceId,
-        challenge_id: challengeRes.challenge_id,
-        challenge: challengeRes.challenge,
-        public_key_spki: enrolled.publicKeySpki,
-        signature: enrolled.signature,
-      });
+      const registerKeyRes = await invokeEdgeFunction(
+        "device-management",
+        {
+          action: "enroll_public_key",
+          device_id: deviceId,
+          challenge_id: challengeRes.challenge_id,
+          challenge: challengeRes.challenge,
+          public_key_spki: enrolled.publicKeySpki,
+          signature: enrolled.signature,
+        },
+        { requireFreshToken: true },
+      );
 
       requireSuccess(registerKeyRes, "Device key registration failed.");
 
@@ -634,7 +687,6 @@ function SecurityPage() {
       setBiometricFlowStep("otp");
       toast.success("Device biometric key registered.");
 
-      // Proceed directly to sending the email OTP for the setting toggle
       setBiometricSubmitting(false);
       await sendBiometricOtp();
     } catch (error: any) {
@@ -663,7 +715,6 @@ function SecurityPage() {
     setBiometricSubmitting(true);
 
     try {
-      // 1. Verify email OTP to get verified otp_id
       const otpResult = await verifyEmailOtp(
         user.email,
         trimmedCode,
@@ -675,34 +726,39 @@ function SecurityPage() {
         throw new Error("Verification reference missing from OTP response.");
       }
 
-      // 2. Request signed_message challenge from device-management
-      const challengeRes = await invokeEdgeFunction("device-management", {
-        action: "issue_biometric_setting_challenge",
-        device_id: deviceId,
-        setting_action: pendingBiometricAction,
-        otp_id: otpId,
-      });
+      const challengeRes = await invokeEdgeFunction(
+        "device-management",
+        {
+          action: "issue_biometric_setting_challenge",
+          device_id: deviceId,
+          setting_action: pendingBiometricAction,
+          otp_id: otpId,
+        },
+        { requireFreshToken: true },
+      );
 
       requireSuccess(
         challengeRes,
         "Could not create biometric verification challenge.",
       );
 
-      // 3. Prompt native Android BiometricPrompt to sign challengeRes.signed_message
       const signature = await signBiometricMessage(
         challengeRes.signed_message,
       );
 
-      // 4. Finalize setting change on backend
-      const finalizeRes = await invokeEdgeFunction("device-management", {
-        action: "verify_biometric_setting_change",
-        device_id: deviceId,
-        setting_action: pendingBiometricAction,
-        otp_id: otpId,
-        challenge_id: challengeRes.challenge_id,
-        challenge: challengeRes.challenge,
-        signature,
-      });
+      const finalizeRes = await invokeEdgeFunction(
+        "device-management",
+        {
+          action: "verify_biometric_setting_change",
+          device_id: deviceId,
+          setting_action: pendingBiometricAction,
+          otp_id: otpId,
+          challenge_id: challengeRes.challenge_id,
+          challenge: challengeRes.challenge,
+          signature,
+        },
+        { requireFreshToken: true },
+      );
 
       requireSuccess(
         finalizeRes,
