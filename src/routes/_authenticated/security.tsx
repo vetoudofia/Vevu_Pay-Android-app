@@ -19,7 +19,13 @@ import {
 import { useAuth } from "@/hooks/use-auth";
 import { supabase } from "@/lib/supabase";
 import { callEdgeFunction } from "@/lib/edge-function";
-import { checkNativeBiometric, isNativeAndroid } from "@/native/biometric";
+import {
+  checkNativeBiometric,
+  isNativeAndroid,
+  getNativeDeviceId,
+  enrollBiometricKey,
+  signBiometricMessage,
+} from "@/native/biometric";
 
 export const Route = createFileRoute("/_authenticated/security")({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -41,7 +47,16 @@ type SecurityOTPPurpose =
   | "password_change"
   | "password_reset"
   | "pin_change"
-  | "pin_reset";
+  | "pin_reset"
+  | "biometric_settings_change";
+
+type BiometricSettingAction =
+  | "biometric_main_enable"
+  | "biometric_main_disable"
+  | "biometric_transactions_enable"
+  | "biometric_transactions_disable";
+
+type BiometricFlowStep = "enroll_key" | "otp";
 
 function sanitizeErrorMessage(raw: unknown, fallback: string): string {
   if (typeof raw === "string") {
@@ -200,16 +215,28 @@ function SecurityPage() {
 
   const [securityLoadError, setSecurityLoadError] = useState("");
 
-  // ACCOUNT-WIDE BIOMETRIC SETTINGS (read-only until secure attestation is supported)
+  // BIOMETRIC SETTINGS & ENROLLMENT STATES
+
   const [biometricLoading, setBiometricLoading] = useState(true);
   const [biometricRefreshing, setBiometricRefreshing] = useState(false);
   const [biometricError, setBiometricError] = useState("");
   const [biometricSettings, setBiometricSettings] = useState<any>(null);
+  const [deviceId, setDeviceId] = useState<string | null>(null);
   const [nativeBiometric, setNativeBiometric] = useState<{
     available: boolean;
     strongBiometry: boolean;
     reason?: string;
   } | null>(null);
+
+  const [pendingBiometricAction, setPendingBiometricAction] =
+    useState<BiometricSettingAction | null>(null);
+  const [biometricFlowStep, setBiometricFlowStep] =
+    useState<BiometricFlowStep>("otp");
+  const [biometricAccountPassword, setBiometricAccountPassword] = useState("");
+  const [showBiometricPw, setShowBiometricPw] = useState(false);
+  const [biometricOtpCode, setBiometricOtpCode] = useState("");
+  const [biometricResendSeconds, setBiometricResendSeconds] = useState(0);
+  const [biometricSubmitting, setBiometricSubmitting] = useState(false);
 
   // COUNTDOWN TIMERS
 
@@ -232,6 +259,16 @@ function SecurityPage() {
 
     return () => window.clearInterval(timer);
   }, [pinResendSeconds > 0]);
+
+  useEffect(() => {
+    if (biometricResendSeconds <= 0) return;
+
+    const timer = window.setInterval(() => {
+      setBiometricResendSeconds((value) => Math.max(0, value - 1));
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [biometricResendSeconds > 0]);
 
   const formatCountdown = (seconds: number) => {
     const minutes = Math.floor(seconds / 60);
@@ -302,6 +339,35 @@ function SecurityPage() {
     };
   }, [user?.id, setupPin]);
 
+  const fetchBiometricState = async () => {
+    const currentDeviceId = isNativeAndroid()
+      ? await getNativeDeviceId().catch(() => null)
+      : null;
+
+    if (currentDeviceId) {
+      setDeviceId(currentDeviceId);
+    }
+
+    const [settingsResult, availability] = await Promise.all([
+      invokeEdgeFunction("device-management", {
+        action: "get_biometric_settings",
+        ...(currentDeviceId ? { device_id: currentDeviceId } : {}),
+      }),
+      checkNativeBiometric().catch((error) => ({
+        available: false,
+        strongBiometry: false,
+        reason:
+          error instanceof Error
+            ? error.message
+            : "Unable to check this device's biometric hardware.",
+      })),
+    ]);
+
+    requireSuccess(settingsResult, "Unable to retrieve biometric settings.");
+    setBiometricSettings(settingsResult.settings ?? settingsResult);
+    setNativeBiometric(availability);
+  };
+
   useEffect(() => {
     let cancelled = false;
 
@@ -310,25 +376,7 @@ function SecurityPage() {
       setBiometricError("");
 
       try {
-        const [settingsResult, availability] = await Promise.all([
-          invokeEdgeFunction("device-management", {
-            action: "get_biometric_settings",
-          }),
-          checkNativeBiometric().catch((error) => ({
-            available: false,
-            strongBiometry: false,
-            reason: error instanceof Error ? error.message : "Unable to check this device's biometric hardware.",
-          })),
-        ]);
-
-        requireSuccess(
-          settingsResult,
-          "Unable to retrieve biometric settings.",
-        );
-
-        if (cancelled) return;
-        setBiometricSettings(settingsResult.settings ?? settingsResult);
-        setNativeBiometric(availability);
+        await fetchBiometricState();
       } catch (error: any) {
         if (cancelled) return;
         const message = await getEdgeErrorMessage(
@@ -367,6 +415,292 @@ function SecurityPage() {
       result,
       "The verification code is invalid, expired, or already used.",
     );
+  };
+
+  // BIOMETRIC ENROLLMENT & SETTING FLOW
+
+  const resetBiometricFlow = () => {
+    setPendingBiometricAction(null);
+    setBiometricFlowStep("otp");
+    setBiometricAccountPassword("");
+    setShowBiometricPw(false);
+    setBiometricOtpCode("");
+    setBiometricResendSeconds(0);
+  };
+
+  const sendBiometricOtp = async () => {
+    if (!user?.email) {
+      toast.error("Unable to identify your registered email.");
+      return;
+    }
+
+    if (biometricSubmitting || biometricResendSeconds > 0) return;
+
+    setBiometricSubmitting(true);
+    try {
+      const data = await invokeEdgeFunction("send-otp", {
+        purpose: "biometric_settings_change",
+      });
+
+      requireSuccess(data, "Could not send verification code.");
+      setBiometricOtpCode("");
+      setBiometricResendSeconds(60);
+      toast.success(
+        sanitizeErrorMessage(
+          data.message,
+          "Verification code sent to your registered email.",
+        ),
+      );
+    } catch (error: any) {
+      toast.error(
+        await getEdgeErrorMessage(error, "Failed to send verification code."),
+      );
+    } finally {
+      setBiometricSubmitting(false);
+    }
+  };
+
+  const startBiometricSettingFlow = async (
+    targetAction: BiometricSettingAction,
+  ) => {
+    if (!isNativeAndroid()) {
+      toast.error("Open the VevuPay Android app to manage device biometrics.");
+      return;
+    }
+
+    if (!nativeBiometric?.available || !nativeBiometric?.strongBiometry) {
+      toast.error(
+        nativeBiometric?.reason ||
+          "Strong biometric authentication is unavailable on this device.",
+      );
+      return;
+    }
+
+    const activeDeviceId =
+      deviceId || (await getNativeDeviceId().catch(() => null));
+
+    if (!activeDeviceId) {
+      toast.error("Could not identify this Android device.");
+      return;
+    }
+
+    setDeviceId(activeDeviceId);
+
+    if (
+      targetAction === "biometric_transactions_enable" &&
+      !hasPin
+    ) {
+      toast.error(
+        "Set up a 6-digit Transaction PIN first as a backup before enabling transaction biometrics.",
+      );
+      return;
+    }
+
+    if (
+      targetAction === "biometric_transactions_enable" &&
+      biometricSettings?.biometric_enabled !== true
+    ) {
+      toast.error("Enable account-wide biometric login first.");
+      return;
+    }
+
+    if (
+      (targetAction === "biometric_main_enable" ||
+        targetAction === "biometric_main_disable") &&
+      biometricSettings?.main_change_available_at &&
+      new Date(biometricSettings.main_change_available_at).getTime() >
+        Date.now()
+    ) {
+      toast.error(
+        `Account biometric login can be changed again on ${new Date(
+          biometricSettings.main_change_available_at,
+        ).toLocaleDateString()}.`,
+      );
+      return;
+    }
+
+    if (
+      (targetAction === "biometric_transactions_enable" ||
+        targetAction === "biometric_transactions_disable") &&
+      typeof biometricSettings?.transaction_changes_remaining === "number" &&
+      biometricSettings.transaction_changes_remaining <= 0
+    ) {
+      toast.error(
+        "You have reached the 3 changes per 7 days limit for transaction biometrics.",
+      );
+      return;
+    }
+
+    setPendingBiometricAction(targetAction);
+    setBiometricAccountPassword("");
+    setBiometricOtpCode("");
+
+    // If this device doesn't have an enrolled ECDSA public key yet, enroll it first.
+    if (!biometricSettings?.device_has_key) {
+      setBiometricFlowStep("enroll_key");
+      return;
+    }
+
+    setBiometricFlowStep("otp");
+    await sendBiometricOtp();
+  };
+
+  const handleEnrollDeviceKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!biometricAccountPassword) {
+      toast.error("Enter your current account password.");
+      return;
+    }
+
+    if (!deviceId || biometricSubmitting) return;
+
+    setBiometricSubmitting(true);
+    try {
+      // 1. Issue enrollment challenge (verifies current password)
+      const challengeRes = await invokeEdgeFunction("device-management", {
+        action: "issue_key_challenge",
+        device_id: deviceId,
+        current_password: biometricAccountPassword,
+      });
+
+      requireSuccess(challengeRes, "Could not start key enrollment.");
+
+      // 2. Prompt Android BiometricPrompt + generate Keystore ECDSA P-256 key & sign
+      const enrolled = await enrollBiometricKey(
+        challengeRes.signed_message ||
+          [
+            "VEVUPAY-DEVICE-KEY-V1",
+            challengeRes.challenge_id,
+            user?.id,
+            challengeRes.device_record_id,
+            "biometric_enrollment",
+            challengeRes.challenge,
+          ].join("\n"),
+      );
+
+      // 3. Register public key on backend
+      const registerKeyRes = await invokeEdgeFunction("device-management", {
+        action: "enroll_public_key",
+        device_id: deviceId,
+        challenge_id: challengeRes.challenge_id,
+        challenge: challengeRes.challenge,
+        public_key_spki: enrolled.publicKeySpki,
+        signature: enrolled.signature,
+      });
+
+      requireSuccess(registerKeyRes, "Device key registration failed.");
+
+      setBiometricSettings((prev: any) => ({
+        ...prev,
+        device_has_key: true,
+      }));
+      setBiometricAccountPassword("");
+      setBiometricFlowStep("otp");
+      toast.success("Device biometric key registered.");
+
+      // Proceed directly to sending the email OTP for the setting toggle
+      setBiometricSubmitting(false);
+      await sendBiometricOtp();
+    } catch (error: any) {
+      toast.error(
+        await getEdgeErrorMessage(error, "Device biometric enrollment failed."),
+      );
+      setBiometricSubmitting(false);
+    }
+  };
+
+  const handleVerifyAndApplyBiometricSetting = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    const trimmedCode = biometricOtpCode.trim();
+    if (!/^\d{6}$/.test(trimmedCode)) {
+      toast.error("Enter the six-digit verification code.");
+      return;
+    }
+
+    if (!user?.email || !deviceId || !pendingBiometricAction) {
+      toast.error("Missing device or account session details.");
+      return;
+    }
+
+    if (biometricSubmitting) return;
+    setBiometricSubmitting(true);
+
+    try {
+      // 1. Verify email OTP to get verified otp_id
+      const otpResult = await verifyEmailOtp(
+        user.email,
+        trimmedCode,
+        "biometric_settings_change",
+      );
+
+      const otpId = otpResult.otp_id || otpResult.id;
+      if (!otpId) {
+        throw new Error("Verification reference missing from OTP response.");
+      }
+
+      // 2. Request signed_message challenge from device-management
+      const challengeRes = await invokeEdgeFunction("device-management", {
+        action: "issue_biometric_setting_challenge",
+        device_id: deviceId,
+        setting_action: pendingBiometricAction,
+        otp_id: otpId,
+      });
+
+      requireSuccess(
+        challengeRes,
+        "Could not create biometric verification challenge.",
+      );
+
+      // 3. Prompt native Android BiometricPrompt to sign challengeRes.signed_message
+      const signature = await signBiometricMessage(
+        challengeRes.signed_message,
+      );
+
+      // 4. Finalize setting change on backend
+      const finalizeRes = await invokeEdgeFunction("device-management", {
+        action: "verify_biometric_setting_change",
+        device_id: deviceId,
+        setting_action: pendingBiometricAction,
+        otp_id: otpId,
+        challenge_id: challengeRes.challenge_id,
+        challenge: challengeRes.challenge,
+        signature,
+      });
+
+      requireSuccess(
+        finalizeRes,
+        "Could not verify biometric device signature.",
+      );
+
+      if (finalizeRes.settings) {
+        setBiometricSettings((prev: any) => ({
+          ...prev,
+          ...finalizeRes.settings,
+        }));
+      } else {
+        await fetchBiometricState();
+      }
+
+      toast.success(
+        sanitizeErrorMessage(
+          finalizeRes.message,
+          "Biometric settings updated successfully.",
+        ),
+      );
+      resetBiometricFlow();
+    } catch (error: any) {
+      setBiometricOtpCode("");
+      toast.error(
+        await getEdgeErrorMessage(
+          error,
+          "Unable to complete biometric setting update.",
+        ),
+      );
+    } finally {
+      setBiometricSubmitting(false);
+    }
   };
 
   // PASSWORD VALIDATION
@@ -869,6 +1203,22 @@ function SecurityPage() {
     setPinResendSeconds(0);
   };
 
+  const accountBiometricEnabled =
+    (biometricSettings?.biometric_enabled ??
+      biometricSettings?.biometrics_enabled) === true;
+
+  const transactionBiometricEnabled =
+    biometricSettings?.transaction_biometrics_enabled === true;
+
+  const biometricActionLabels: Record<BiometricSettingAction, string> = {
+    biometric_main_enable: "Enable account-wide biometric login",
+    biometric_main_disable: "Disable account-wide biometric login",
+    biometric_transactions_enable:
+      "Enable biometrics for purchases and transfers",
+    biometric_transactions_disable:
+      "Disable biometrics for purchases and transfers",
+  };
+
   // PAGE UI
 
   return (
@@ -1213,26 +1563,17 @@ function SecurityPage() {
             type="button"
             onClick={() => {
               setBiometricRefreshing(true);
-              void (async () => {
-                try {
-                  const [settingsResult, availability] = await Promise.all([
-                    invokeEdgeFunction("device-management", { action: "get_biometric_settings" }),
-                    checkNativeBiometric().catch((error) => ({
-                      available: false,
-                      strongBiometry: false,
-                      reason: error instanceof Error ? error.message : "Unable to check biometric hardware.",
-                    })),
-                  ]);
-                  requireSuccess(settingsResult, "Unable to retrieve biometric settings.");
-                  setBiometricSettings(settingsResult.settings ?? settingsResult);
-                  setNativeBiometric(availability);
-                  setBiometricError("");
-                } catch (error: any) {
-                  setBiometricError(await getEdgeErrorMessage(error, "Unable to load biometric settings."));
-                } finally {
-                  setBiometricRefreshing(false);
-                }
-              })();
+              void fetchBiometricState()
+                .then(() => setBiometricError(""))
+                .catch(async (error: any) => {
+                  setBiometricError(
+                    await getEdgeErrorMessage(
+                      error,
+                      "Unable to load biometric settings.",
+                    ),
+                  );
+                })
+                .finally(() => setBiometricRefreshing(false));
             }}
             disabled={biometricLoading || biometricRefreshing}
             aria-label="Refresh biometric settings"
@@ -1252,84 +1593,250 @@ function SecurityPage() {
           </div>
         ) : (
           <div className="mt-5 space-y-4">
+            {/* Account-Wide Biometric Login */}
             <div className="flex items-center justify-between gap-3 rounded-xl border border-border p-4">
               <div className="flex items-center gap-3">
                 <Smartphone className="h-5 w-5 text-muted-foreground" />
                 <div>
                   <p className="font-medium">Account-wide biometric login</p>
                   <p className="text-xs text-muted-foreground">
-                    {(biometricSettings?.biometric_enabled ?? biometricSettings?.biometrics_enabled) === true
+                    {accountBiometricEnabled
                       ? "Enabled on your registered device"
                       : "Currently disabled"}
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${(biometricSettings?.biometric_enabled ?? biometricSettings?.biometrics_enabled) === true ? "bg-green-500/10 text-green-600" : "bg-secondary text-muted-foreground"}`}>
-                  {(biometricSettings?.biometric_enabled ?? biometricSettings?.biometrics_enabled) === true ? "On" : "Off"}
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    accountBiometricEnabled
+                      ? "bg-green-500/10 text-green-600"
+                      : "bg-secondary text-muted-foreground"
+                  }`}
+                >
+                  {accountBiometricEnabled ? "On" : "Off"}
                 </span>
                 <button
                   type="button"
-                  onClick={() => {
-                    toast.info("Biometric enrollment must be completed by the device-management security flow before this setting can be changed.");
-                  }}
-                  title="Manage biometric enrollment"
-                  className="rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90"
+                  disabled={biometricSubmitting}
+                  onClick={() =>
+                    void startBiometricSettingFlow(
+                      accountBiometricEnabled
+                        ? "biometric_main_disable"
+                        : "biometric_main_enable",
+                    )
+                  }
+                  className="rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
                 >
-                  {(biometricSettings?.biometric_enabled ?? biometricSettings?.biometrics_enabled) === true ? "Disable" : "Enable"}
+                  {accountBiometricEnabled ? "Disable" : "Enable"}
                 </button>
               </div>
             </div>
 
+            {/* Transaction Biometrics */}
             <div className="rounded-xl border border-border p-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <p className="font-medium">Also use biometrics for purchases and transfers</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    One setting for both purchases and wallet transfers. It can only be enabled when account biometrics are active.
+                  <p className="font-medium">
+                    Also use biometrics for purchases and transfers
                   </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    One setting for both purchases and wallet transfers. Requires account biometrics and a 6-digit Transaction PIN fallback.
+                  </p>
+                  {typeof biometricSettings?.transaction_changes_remaining === "number" && (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Changes remaining this week:{" "}
+                      <strong>{biometricSettings.transaction_changes_remaining} of 3</strong>
+                    </p>
+                  )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <span className={`rounded-full px-3 py-1 text-xs font-semibold ${biometricSettings?.transaction_biometrics_enabled === true ? "bg-green-500/10 text-green-600" : "bg-secondary text-muted-foreground"}`}>
-                    {biometricSettings?.transaction_biometrics_enabled === true ? "On" : "Off"}
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                      transactionBiometricEnabled
+                        ? "bg-green-500/10 text-green-600"
+                        : "bg-secondary text-muted-foreground"
+                    }`}
+                  >
+                    {transactionBiometricEnabled ? "On" : "Off"}
                   </span>
                   <input
                     type="checkbox"
-                    checked={biometricSettings?.transaction_biometrics_enabled === true}
+                    checked={transactionBiometricEnabled}
+                    disabled={biometricSubmitting || !accountBiometricEnabled}
                     onChange={(event) => {
-                      setBiometricSettings((previous: any) => ({
-                        ...previous,
-                        transaction_biometrics_enabled: event.target.checked,
-                      }));
-                      toast.info("This selection is displayed locally only until the server-side biometric setting action is connected.");
+                      const nextState = event.target.checked;
+                      void startBiometricSettingFlow(
+                        nextState
+                          ? "biometric_transactions_enable"
+                          : "biometric_transactions_disable",
+                      );
                     }}
                     aria-label="Use biometrics for purchases and transfers"
-                    className="h-4 w-4 accent-primary"
+                    className="h-4 w-4 accent-primary disabled:opacity-50"
                   />
                 </div>
               </div>
             </div>
 
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
-              <div className="flex items-start gap-2">
-                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                <div className="text-xs text-muted-foreground">
-                  <p className="font-semibold text-foreground">Secure enrollment is not available yet</p>
-                  <p className="mt-1">
-                    Biometric changes are temporarily unavailable until the server can verify Android Keystore hardware attestation. This prevents a device-only switch from falsely enabling account or payment security.
+            {/* Interactive Biometric Enrollment / OTP Verification Drawer */}
+            {pendingBiometricAction && (
+              <div className="space-y-4 rounded-xl border border-primary/30 bg-primary/5 p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold">
+                    {biometricActionLabels[pendingBiometricAction]}
                   </p>
-                  {!isNativeAndroid() && (
-                    <p className="mt-2">Open the VevuPay Android app to check device biometric support.</p>
-                  )}
-                  {isNativeAndroid() && nativeBiometric && !nativeBiometric.available && (
-                    <p className="mt-2">Device check: {nativeBiometric.reason || "Biometric authentication is unavailable on this device."}</p>
-                  )}
-                  {isNativeAndroid() && nativeBiometric?.available && (
-                    <p className="mt-2">Device biometrics are detected, but server-side hardware attestation is still required before activation.</p>
-                  )}
+                  <button
+                    type="button"
+                    onClick={resetBiometricFlow}
+                    disabled={biometricSubmitting}
+                    className="text-xs font-semibold text-muted-foreground hover:text-foreground"
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                {biometricFlowStep === "enroll_key" ? (
+                  <form onSubmit={handleEnrollDeviceKey} className="space-y-3">
+                    <p className="text-xs text-muted-foreground">
+                      Step 1 of 2: Enter your account password to register a hardware-backed biometric key on this device.
+                    </p>
+
+                    <div className="relative">
+                      <input
+                        type={showBiometricPw ? "text" : "password"}
+                        value={biometricAccountPassword}
+                        onChange={(e) =>
+                          setBiometricAccountPassword(e.target.value)
+                        }
+                        placeholder="Current account password"
+                        className="input-field pr-10"
+                        autoComplete="current-password"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowBiometricPw(!showBiometricPw)}
+                        aria-label={
+                          showBiometricPw ? "Hide password" : "Show password"
+                        }
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+                      >
+                        {showBiometricPw ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={biometricSubmitting}
+                      className="btn-primary flex w-full items-center justify-center py-2.5 text-sm disabled:opacity-50"
+                    >
+                      {biometricSubmitting && (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      )}
+                      {biometricSubmitting
+                        ? "Enrolling device key..."
+                        : "Verify Password & Enroll Key"}
+                    </button>
+                  </form>
+                ) : (
+                  <form
+                    onSubmit={handleVerifyAndApplyBiometricSetting}
+                    className="space-y-3"
+                  >
+                    <p className="text-xs text-muted-foreground">
+                      Enter the 6-digit verification code sent to your registered email, then confirm with your fingerprint or face.
+                    </p>
+
+                    <div className="text-center text-xs text-muted-foreground">
+                      {biometricResendSeconds > 0 ? (
+                        <span>
+                          Resend available in{" "}
+                          <strong className="font-mono text-foreground">
+                            {formatCountdown(biometricResendSeconds)}
+                          </strong>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={sendBiometricOtp}
+                          disabled={biometricSubmitting}
+                          className="font-semibold text-primary hover:underline disabled:opacity-50"
+                        >
+                          Resend code
+                        </button>
+                      )}
+                    </div>
+
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      maxLength={6}
+                      value={biometricOtpCode}
+                      onChange={(e) =>
+                        setBiometricOtpCode(
+                          e.target.value.replace(/\D/g, "").slice(0, 6),
+                        )
+                      }
+                      placeholder="000000"
+                      className="input-field text-center font-mono text-2xl tracking-[0.7em]"
+                      required
+                      autoFocus
+                    />
+
+                    <button
+                      type="submit"
+                      disabled={
+                        biometricSubmitting || biometricOtpCode.length !== 6
+                      }
+                      className="btn-primary flex w-full items-center justify-center py-2.5 text-sm disabled:opacity-50"
+                    >
+                      {biometricSubmitting && (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      )}
+                      {biometricSubmitting
+                        ? "Verifying..."
+                        : "Verify & Confirm with Biometrics"}
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
+
+            {/* Hardware & Attestation Status Notice */}
+            {(!isNativeAndroid() ||
+              !nativeBiometric?.available ||
+              biometricSettings?.device_attestation_verified === false) && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                <div className="flex items-start gap-2">
+                  <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  <div className="text-xs text-muted-foreground">
+                    {!isNativeAndroid() && (
+                      <p>Open the VevuPay Android app to manage device biometric security.</p>
+                    )}
+                    {isNativeAndroid() && nativeBiometric && !nativeBiometric.available && (
+                      <p>
+                        Device check:{" "}
+                        {nativeBiometric.reason ||
+                          "Biometric authentication is unavailable on this device."}
+                      </p>
+                    )}
+                    {isNativeAndroid() &&
+                      nativeBiometric?.available &&
+                      biometricSettings?.device_attestation_verified === false && (
+                        <p>
+                          Hardware attestation for this device has not been verified on the server yet. Complete device attestation before enabling biometric settings.
+                        </p>
+                      )}
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </section>
