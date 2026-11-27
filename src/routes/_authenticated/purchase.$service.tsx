@@ -26,6 +26,13 @@ import { PageHeader } from "@/components/PageHeader";
 import { detectNetworkSlug, detectNetworkName } from "@/lib/network-detector";
 import { SuccessScreen } from "@/components/SuccessScreen";
 import { ErrorPopup } from "@/components/ErrorPopup";
+import {
+  authorizeTransactionWithBiometric,
+  getTransactionBiometricSettings,
+  sha256Hex,
+  type TransactionBiometricAuthorization,
+} from "@/native/transaction-biometric";
+import { isNativeAndroid } from "@/native/biometric";
 
 type CouponInfo = {
   code: string;
@@ -311,6 +318,11 @@ function PurchasePage() {
   const [checkingPinStatus, setCheckingPinStatus] = useState(false);
   const [pinSetupPromptOpen, setPinSetupPromptOpen] = useState(false);
   const [pinModalOpen, setPinModalOpen] = useState(false);
+  const [biometricModalOpen, setBiometricModalOpen] = useState(false);
+  const [biometricLoading, setBiometricLoading] = useState(false);
+  const [biometricError, setBiometricError] = useState<string | null>(null);
+  const [biometricDeviceId, setBiometricDeviceId] = useState<string | null>(null);
+  const [biometricAuthorization, setBiometricAuthorization] = useState<TransactionBiometricAuthorization | null>(null);
   const [transactionPin, setTransactionPin] = useState("");
   const [pinError, setPinError] = useState<string | null>(null);
   const pinInputRef = useRef<HTMLInputElement>(null);
@@ -922,20 +934,128 @@ function PurchasePage() {
       toast.error(err);
       return;
     }
-    const pinExists = await checkUserHasPin();
-    if (pinExists === false) {
-      setPinSetupPromptOpen(true);
-      return;
-    }
     if (!attemptReferenceRef.current) {
       attemptReferenceRef.current = createAttemptReference(key);
     }
     setTransactionPin("");
     setPinError(null);
+    setBiometricAuthorization(null);
+    setBiometricError(null);
+
+    try {
+      const settings = await getTransactionBiometricSettings();
+      if (
+        isNativeAndroid() &&
+        settings.biometric_enabled &&
+        settings.transaction_biometrics_enabled &&
+        settings.biometric_device_id
+      ) {
+        setBiometricDeviceId(settings.biometric_device_id);
+        setBiometricModalOpen(true);
+        return;
+      }
+      setBiometricDeviceId(null);
+    } catch (error: any) {
+      toast.error(error?.message || "Unable to check transaction biometric settings.");
+    }
+
+    const pinExists = await checkUserHasPin();
+    if (pinExists === false) {
+      setPinSetupPromptOpen(true);
+      return;
+    }
     setPinModalOpen(true);
   };
 
-  const executePurchase = async () => {
+  const buildPurchaseBiometricPayload = () => {
+    const reference = attemptReferenceRef.current;
+    if (!reference) throw new Error("Purchase reference is missing. Please try again.");
+    let grossAmount = Number(subtotal);
+    let details: Record<string, unknown>;
+
+    if (key === "airtime" || key === "data") {
+      const digits = recipient.replace(/\D/g, "");
+      const normalizedPhone = digits.startsWith("234") && digits.length === 13
+        ? `0${digits.slice(3)}`
+        : digits.length === 10 ? `0${digits}` : digits;
+      const network = providerSlug.trim().toLowerCase();
+      if (key === "airtime") {
+        details = { recipient: normalizedPhone, provider_id: network };
+        grossAmount = key === "airtime" ? Number(amount) : grossAmount;
+      } else {
+        details = {
+          recipient: normalizedPhone,
+          provider_id: network,
+          plan_id: String(planId),
+          plan_type: selectedCategory.trim() || "SME",
+        };
+      }
+    } else if (key === "tv") {
+      details = {
+        provider_id: providerSlug.trim().toLowerCase(),
+        plan_id: String(planId),
+        smartcard: recipient.replace(/\D/g, ""),
+      };
+    } else if (key === "electricity") {
+      details = {
+        provider_id: providerSlug.trim().toLowerCase(),
+        amount: Number(amount),
+        meter_number: recipient.replace(/\D/g, ""),
+        meter_type: meterType === "prepaid" ? 1 : 2,
+      };
+    } else if (key === "education") {
+      details = {
+        provider_id: providerSlug.trim().toLowerCase(),
+        quantity: Math.floor(Number(amount)),
+      };
+      grossAmount = Number(educationPrice?.total_amount ?? subtotal);
+    } else {
+      details = {
+        provider_id: providerSlug.trim().toLowerCase(),
+        amount: Number(amount),
+        customer_id: recipient.trim(),
+      };
+      grossAmount = Number(amount);
+    }
+
+    const canonical = JSON.stringify([
+      "VEVUPAY-PURCHASE-AUTH-V1",
+      user?.id,
+      key,
+      reference,
+      Math.round(grossAmount * 100),
+      details,
+    ]);
+    return { reference, canonical };
+  };
+
+  const handleBiometricPurchase = async () => {
+    if (!biometricDeviceId || biometricLoading || loading) return;
+    setBiometricLoading(true);
+    setBiometricError(null);
+    try {
+      const { reference, canonical } = buildPurchaseBiometricPayload();
+      const payloadHash = await sha256Hex(canonical);
+      const authorization = await authorizeTransactionWithBiometric({
+        deviceId: biometricDeviceId,
+        transactionType: "purchase",
+        transactionReference: reference,
+        transactionPayloadHash: payloadHash,
+      });
+      setBiometricAuthorization(authorization);
+      setLoading(true);
+      await executePurchase(authorization);
+    } catch (error: any) {
+      const message = getCleanErrorMessage(error) || "Fingerprint authorization could not be completed.";
+      setBiometricError(message);
+      toast.error(message);
+    } finally {
+      setLoading(false);
+      setBiometricLoading(false);
+    }
+  };
+
+  const executePurchase = async (biometricAuth: TransactionBiometricAuthorization | null = null) => {
     if (submitInFlightRef.current) return;
     submitInFlightRef.current = true;
 
@@ -948,8 +1068,9 @@ function PurchasePage() {
         service: key,
         provider_id: providerSlug,
         reference: attemptReferenceRef.current,
-        pin: transactionPin,
+        pin: biometricAuth ? "" : transactionPin,
         use_cashback: useCashback && cashbackAvailable,
+        ...(biometricAuth ?? {}),
       };
       if (activeCouponCode) {
         payload.coupon_code = activeCouponCode;
@@ -992,6 +1113,8 @@ function PurchasePage() {
         setCouponCode("");
         setCustomCouponInput("");
         closePinModal();
+        setBiometricModalOpen(false);
+        setBiometricAuthorization(null);
         const isProcessing = resData.status === "processing" || resData.status === "pending";
         if (isProcessing) {
           toast.success("Order received. Your exam pins will appear in Transactions shortly.");
@@ -1933,6 +2056,30 @@ function PurchasePage() {
                 Setup
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- TRANSACTION BIOMETRIC AUTHORIZATION --- */}
+      {biometricModalOpen && (
+        <div role="dialog" aria-modal="true" aria-label="Authorize purchase with fingerprint" className="fixed inset-0 z-[105] flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-sm bg-card rounded-t-3xl sm:rounded-3xl shadow-2xl p-6 text-center space-y-5">
+            <div className="mx-auto w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center text-primary">
+              <ShieldCheck className="h-7 w-7" />
+            </div>
+            <h3 className="text-xl font-bold text-foreground">Authorize with fingerprint</h3>
+            <p className="text-sm text-muted-foreground">Confirm your {cfg.label.toLowerCase()} purchase securely using your registered device biometrics.</p>
+            {biometricError && <p role="alert" className="text-sm text-destructive">{biometricError}</p>}
+            <button type="button" onClick={handleBiometricPurchase} disabled={biometricLoading || loading} className="w-full py-3 rounded-xl bg-primary text-primary-foreground font-bold flex items-center justify-center gap-2 disabled:opacity-50">
+              {biometricLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : <ShieldCheck className="h-5 w-5" />}
+              {biometricLoading ? "Waiting for fingerprint..." : "Continue with fingerprint"}
+            </button>
+            <button type="button" disabled={biometricLoading || loading} onClick={async () => {
+              const pinExists = await checkUserHasPin();
+              if (pinExists === false) { setBiometricModalOpen(false); setPinSetupPromptOpen(true); return; }
+              setBiometricModalOpen(false); setBiometricError(null); setTransactionPin(""); setPinError(null); setPinModalOpen(true);
+            }} className="w-full py-3 rounded-xl bg-secondary text-foreground font-semibold hover:bg-secondary/80 disabled:opacity-50">Use PIN instead</button>
+            <button type="button" disabled={biometricLoading || loading} onClick={() => { setBiometricModalOpen(false); setBiometricAuthorization(null); }} className="text-xs text-muted-foreground underline underline-offset-4">Cancel</button>
           </div>
         </div>
       )}
