@@ -154,7 +154,8 @@ function TransferPage() {
   const [pin, setPin] = useState("");
   const [biometricDeviceId, setBiometricDeviceId] = useState<string | null>(null);
   const [biometricError, setBiometricError] = useState("");
-  const [biometricAuthorization, setBiometricAuthorization] = useState<TransactionBiometricAuthorization | null>(null);
+  const [biometricAuthorization, setBiometricAuthorization] =
+    useState<TransactionBiometricAuthorization | null>(null);
 
   // Recipient verification & saved recipients
   const [verifiedRecipient, setVerifiedRecipient] =
@@ -395,6 +396,8 @@ function TransferPage() {
     setStep("success");
 
     setPin("");
+    setBiometricAuthorization(null);
+    setBiometricError("");
     setTransferId(null);
     setRequestKey(null);
 
@@ -575,7 +578,12 @@ function TransferPage() {
         });
         if (seq !== newRecipientRequestSeqRef.current) return;
         const recipients = (data || []) as RecipientLookupResult[];
-        if (error || recipients.length !== 1 || !recipients[0]?.id || !recipients[0]?.vevu_id) {
+        if (
+          error ||
+          recipients.length !== 1 ||
+          !recipients[0]?.id ||
+          !recipients[0]?.vevu_id
+        ) {
           toast.error("Please verify the Vevu ID first.");
           return;
         }
@@ -775,45 +783,33 @@ function TransferPage() {
     setVerifiedRecipient(null);
 
     try {
-      const { data, error } = await supabase.rpc(
-        "lookup_recipient",
-        {
-          search_query: query,
-        }
-      );
+      const { data, error } = await supabase.rpc("lookup_recipient", {
+        search_query: query,
+      });
 
       if (seq !== verifyRequestSeqRef.current) return;
 
       if (error) {
-        toast.error(
-          "Unable to verify Vevu ID. Please try again."
-        );
+        toast.error("Unable to verify Vevu ID. Please try again.");
         return;
       }
 
-      const recipients =
-        (data || []) as RecipientLookupResult[];
+      const recipients = (data || []) as RecipientLookupResult[];
 
       if (recipients.length === 0) {
-        toast.error(
-          "Recipient not found. Check the Vevu ID."
-        );
+        toast.error("Recipient not found. Check the Vevu ID.");
         return;
       }
 
       if (recipients.length > 1) {
-        toast.error(
-          "Multiple recipients found. Please check the exact Vevu ID."
-        );
+        toast.error("Multiple recipients found. Please check the exact Vevu ID.");
         return;
       }
 
       const recipient = recipients[0];
 
       if (!recipient.id || !recipient.vevu_id) {
-        toast.error(
-          "Invalid recipient information. Please try again."
-        );
+        toast.error("Invalid recipient information. Please try again.");
         return;
       }
 
@@ -854,9 +850,7 @@ function TransferPage() {
     await verifyRecipientByQuery(vevuId, true);
   };
 
-  const handleProceedToAuth = async (
-    e: React.FormEvent
-  ) => {
+  const handleProceedToAuth = async (e: React.FormEvent) => {
     e.preventDefault();
 
     const numAmount = Number(amount);
@@ -906,6 +900,8 @@ function TransferPage() {
     setTransferId(null);
     setRequestKey(null);
 
+    const pinExists = await checkUserHasPin();
+
     try {
       const settings = await getTransactionBiometricSettings();
       if (
@@ -923,7 +919,6 @@ function TransferPage() {
       toast.error(error?.message || "Unable to check transaction biometric settings.");
     }
 
-    const pinExists = await checkUserHasPin();
     if (pinExists === false) {
       setPinSetupPromptOpen(true);
       return;
@@ -931,16 +926,14 @@ function TransferPage() {
     setStep("pin");
   };
 
-  const handleInitiateTransfer = async (
-    e: React.FormEvent,
-    biometricAuth: TransactionBiometricAuthorization | null = null,
-  ) => {
-    e.preventDefault();
-
+  const submitTransferAuthorization = async (
+    biometricAuth: TransactionBiometricAuthorization | null,
+    pinValue: string
+  ): Promise<boolean> => {
     if (!verifiedRecipient) {
       toast.error("Please verify the recipient Vevu ID again.");
       setStep("input");
-      return;
+      return false;
     }
 
     const numAmount = Number(amount);
@@ -951,13 +944,13 @@ function TransferPage() {
       !hasAtMostTwoDecimals(amount)
     ) {
       toast.error("Please enter a valid transfer amount.");
-      return;
+      return false;
     }
 
     if (numAmount < MIN_TRANSFER_AMOUNT) {
       toast.error(`Minimum transfer amount is ${formatNaira(MIN_TRANSFER_AMOUNT)}.`);
       setStep("input");
-      return;
+      return false;
     }
 
     if (numAmount > maxAllowedByTier) {
@@ -965,95 +958,99 @@ function TransferPage() {
         `Amount cannot exceed ${formatNaira(maxAllowedByTier)} based on your Tier ${allowance.tier} limits.`
       );
       setStep("input");
-      return;
+      return false;
     }
 
-    if (!biometricAuth && !/^\d{6}$/.test(pin)) {
-      toast.error(
-        "Please enter your 6-digit transaction PIN."
-      );
-      return;
+    if (!biometricAuth && !/^\d{6}$/.test(pinValue)) {
+      toast.error("Please enter your 6-digit transaction PIN.");
+      return false;
     }
+
+    const currentRequestKey = requestKey || crypto.randomUUID();
+    if (!requestKey) {
+      setRequestKey(currentRequestKey);
+    }
+
+    const activeRecipient = verifiedRecipient;
+    const cleanNarration = (note.trim() || "Peer-to-peer wallet transfer").slice(
+      0,
+      100
+    );
+
+    const { data, error } = await supabase.functions.invoke(
+      "initiate-transfer",
+      {
+        body: {
+          recipientIdentifier: activeRecipient.vevu_id,
+          amount: numAmount,
+          narration: cleanNarration,
+          transactionPin: biometricAuth ? "" : pinValue,
+          requestKey: currentRequestKey,
+          ...(biometricAuth ?? {}),
+        },
+      }
+    );
+
+    if (error) {
+      const message = await getFunctionError(
+        error,
+        "Unable to authorize this transfer. Please try again."
+      );
+
+      if (
+        message.toLowerCase().includes("set up your pin") ||
+        message.toLowerCase().includes("no pin")
+      ) {
+        setHasPin(false);
+        setStep("input");
+        setPinSetupPromptOpen(true);
+        return false;
+      }
+
+      toast.error(message);
+      return false;
+    }
+
+    const result = data as InitiateTransferResponse | null;
+
+    if (!result?.success) {
+      const errMsg =
+        result?.message || result?.error || "Transfer authorization failed.";
+      if (
+        errMsg.toLowerCase().includes("set up your pin") ||
+        errMsg.toLowerCase().includes("no pin")
+      ) {
+        setHasPin(false);
+        setStep("input");
+        setPinSetupPromptOpen(true);
+        return false;
+      }
+      toast.error(errMsg);
+      return false;
+    }
+
+    const authorizationId = result.transferId || result.transfer_id;
+
+    if (!authorizationId) {
+      toast.error(
+        "Transfer authorization was not returned. Please contact support before retrying."
+      );
+      return false;
+    }
+
+    setTransferId(authorizationId);
+    return await completeTransfer(authorizationId, activeRecipient, numAmount);
+  };
+
+  const handleInitiateTransfer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (loading) return;
 
     setLoading(true);
-
     try {
-      const currentRequestKey =
-        requestKey || crypto.randomUUID();
-
-      if (!requestKey) {
-        setRequestKey(currentRequestKey);
-      }
-
-      const activeRecipient = verifiedRecipient;
-
-      const { data, error } = await supabase.functions.invoke(
-        "initiate-transfer",
-        {
-          body: {
-            recipientIdentifier: activeRecipient.vevu_id,
-            amount: numAmount,
-            narration:
-              note.trim() ||
-              "Peer-to-peer wallet transfer",
-            transactionPin: biometricAuth ? "" : pin,
-            requestKey: currentRequestKey,
-            ...(biometricAuth ?? {}),
-          },
-        }
-      );
-
-      if (error) {
-        const message = await getFunctionError(
-          error,
-          "Unable to authorize this transfer. Please try again."
-        );
-
-        if (message.toLowerCase().includes("set up your pin") || message.toLowerCase().includes("no pin")) {
-          setHasPin(false);
-          setStep("input");
-          setPinSetupPromptOpen(true);
-          return;
-        }
-
-        toast.error(message);
-        return;
-      }
-
-      const result =
-        data as InitiateTransferResponse | null;
-
-      if (!result?.success) {
-        const errMsg =
-          result?.message || result?.error || "Transfer authorization failed.";
-        if (errMsg.toLowerCase().includes("set up your pin") || errMsg.toLowerCase().includes("no pin")) {
-          setHasPin(false);
-          setStep("input");
-          setPinSetupPromptOpen(true);
-          return;
-        }
-        toast.error(errMsg);
-        return;
-      }
-
-      const authorizationId =
-        result.transferId || result.transfer_id;
-
-      if (!authorizationId) {
-        toast.error(
-          "Transfer authorization was not returned. Please contact support before retrying."
-        );
-        return;
-      }
-
-      setTransferId(authorizationId);
-      setPin("");
-
-      await completeTransfer(authorizationId, activeRecipient, numAmount);
+      await submitTransferAuthorization(null, pin);
     } catch {
-      toast.error(
-        "An unexpected error occurred while authorizing the transfer."
-      );
+      toast.error("An unexpected error occurred while authorizing the transfer.");
     } finally {
       setPin("");
       setLoading(false);
@@ -1061,49 +1058,67 @@ function TransferPage() {
   };
 
   const handleBiometricTransfer = async () => {
-      if (!verifiedRecipient || !biometricDeviceId || loading) return;
-      setLoading(true);
-      setBiometricError("");
-      try {
-        const currentRequestKey = requestKey || crypto.randomUUID();
-        if (!requestKey) setRequestKey(currentRequestKey);
-        const numAmount = Number(amount);
-        const narration = note.trim() || "Peer-to-peer wallet transfer";
-        const { data: authData, error: authError } = await supabase.auth.getUser();
-        if (authError || !authData.user?.id) throw new Error("Your session has expired. Please sign in again.");
-        const canonical = JSON.stringify([
-          "VEVUPAY-TRANSFER-AUTH-V1",
-          authData.user.id,
-          currentRequestKey,
-          Math.round(numAmount * 100),
-          verifiedRecipient.vevu_id.trim(),
-          narration.slice(0, 100),
-        ]);
-        const payloadHash = await sha256Hex(canonical);
-        const authorization = await authorizeTransactionWithBiometric({
-          deviceId: biometricDeviceId,
-          transactionType: "transfer",
-          transactionReference: currentRequestKey,
-          transactionPayloadHash: payloadHash,
-        });
-        setBiometricAuthorization(authorization);
-        await handleInitiateTransfer({ preventDefault: () => {} } as React.FormEvent, authorization);
-      } catch (error: any) {
-        const message = error?.message || "Fingerprint authorization could not be completed.";
-        setBiometricError(message);
-        toast.error(message);
-      } finally {
-        setLoading(false);
+    if (!verifiedRecipient || !biometricDeviceId || loading) return;
+
+    setLoading(true);
+    setBiometricError("");
+
+    try {
+      const currentRequestKey = requestKey || crypto.randomUUID();
+      if (!requestKey) {
+        setRequestKey(currentRequestKey);
       }
-    };
+
+      const numAmount = Number(amount);
+      const narration = (note.trim() || "Peer-to-peer wallet transfer").slice(
+        0,
+        100
+      );
+
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError || !authData.user?.id) {
+        throw new Error("Your session has expired. Please sign in again.");
+      }
+
+      const canonical = JSON.stringify([
+        "VEVUPAY-TRANSFER-AUTH-V1",
+        authData.user.id,
+        currentRequestKey,
+        Math.round(numAmount * 100),
+        verifiedRecipient.vevu_id.trim(),
+        narration,
+      ]);
+      const payloadHash = await sha256Hex(canonical);
+
+      const authorization = await authorizeTransactionWithBiometric({
+        deviceId: biometricDeviceId,
+        transactionType: "transfer",
+        transactionReference: currentRequestKey,
+        transactionPayloadHash: payloadHash,
+      });
+
+      setBiometricAuthorization(authorization);
+      const ok = await submitTransferAuthorization(authorization, "");
+      if (!ok) {
+        setBiometricError(
+          "Fingerprint transfer could not be verified. Try again or switch to your 6-digit PIN."
+        );
+      }
+    } catch (error: any) {
+      const message =
+        error?.message || "Fingerprint authorization could not be completed.";
+      setBiometricError(message);
+      toast.error(message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="space-y-6 max-w-xl mx-auto pb-12">
-
       {/* TOP HEADER */}
 
       <div className="flex items-center gap-3">
-
         <Link
           to="/dashboard"
           className="rounded-2xl bg-slate-900 border border-slate-800 p-2.5 text-slate-300 hover:text-white transition shadow-inner"
@@ -1120,7 +1135,6 @@ function TransferPage() {
             Instant peer-to-peer fund transfer by Vevu ID
           </p>
         </div>
-
       </div>
 
       {/* TIER & 24-HOUR ALLOWANCE CARD */}
@@ -1183,27 +1197,23 @@ function TransferPage() {
       {/* SECURITY BANNER */}
 
       <div className="rounded-2xl bg-slate-900/60 border border-cyan-500/20 p-4 flex items-start gap-3 backdrop-blur shadow-inner">
-
         <div className="p-2 rounded-xl bg-cyan-500/10 text-cyan-400 shrink-0 mt-0.5">
           <ShieldCheck className="h-5 w-5" />
         </div>
 
         <p className="text-xs text-slate-300 leading-relaxed">
-          Transfers are protected by your 6-digit transaction PIN
-          with idempotent processing and instant wallet settlement.
+          Transfers are protected by fingerprint authorization or your 6-digit
+          transaction PIN with idempotent processing and instant wallet settlement.
         </p>
-
       </div>
 
       {/* STEP 1: RECIPIENT AND AMOUNT */}
 
       {step === "input" && (
-
         <form
           onSubmit={handleProceedToAuth}
           className="rounded-3xl bg-slate-900/90 border border-cyan-500/30 p-6 space-y-5 shadow-[0_0_40px_rgba(25,197,194,0.08)] backdrop-blur"
         >
-
           {/* TOP 2 MOST-TRANSFERRED RECIPIENTS + VIEW ALL */}
 
           <div className="space-y-2.5">
@@ -1298,20 +1308,20 @@ function TransferPage() {
             ) : (
               !loadingRecipients && (
                 <p className="text-xs text-slate-500">
-                  No saved recipients yet. Tap <strong className="text-slate-300">Add</strong> or complete a transfer to save one.
+                  No saved recipients yet. Tap{" "}
+                  <strong className="text-slate-300">Add</strong> or complete a
+                  transfer to save one.
                 </p>
               )
             )}
           </div>
 
           <div>
-
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
               Recipient Vevu ID
             </label>
 
             <div className="flex gap-2">
-
               <input
                 type="text"
                 placeholder="e.g. VP47565202"
@@ -1329,74 +1339,56 @@ function TransferPage() {
               <button
                 type="button"
                 onClick={handleVerifyRecipient}
-                disabled={
-                  verifying ||
-                  !identifier.trim()
-                }
+                disabled={verifying || !identifier.trim()}
                 className="px-5 rounded-2xl bg-slate-800 border border-slate-700 text-cyan-300 font-bold text-xs hover:bg-slate-700 transition disabled:opacity-50 shrink-0 flex items-center gap-1.5"
               >
-
                 {verifying ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <UserCheck className="h-4 w-4" />
                 )}
-
                 Verify
-
               </button>
-
             </div>
 
             {verifiedRecipient && (
-
               <div className="mt-3 flex items-center justify-between px-4 py-3 rounded-2xl bg-cyan-950/40 border border-cyan-500/40 text-cyan-300 animate-fadeIn">
-
                 <div className="flex items-center gap-2.5">
-
                   <div className="p-1.5 rounded-full bg-cyan-500/20 text-cyan-400">
                     <Check className="h-4 w-4" />
                   </div>
 
                   <div>
-
                     <p className="text-[10px] uppercase font-bold text-cyan-400 tracking-wider">
                       Recipient Verified
                     </p>
 
                     <p className="text-sm font-extrabold text-white">
                       {verifiedRecipient.full_name}
-
                       <span className="font-mono text-xs text-slate-400 ml-1">
                         ({verifiedRecipient.vevu_id})
                       </span>
                     </p>
-
                   </div>
-
                 </div>
-
               </div>
-
             )}
-
           </div>
 
           {/* AMOUNT */}
 
           <div>
-
             <div className="flex items-center justify-between mb-2">
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
                 Amount (₦)
               </label>
               <span className="text-[11px] text-cyan-300 font-semibold">
-                Min {formatNaira(MIN_TRANSFER_AMOUNT)} · Cap now: {formatNaira(effectiveInputCap)}
+                Min {formatNaira(MIN_TRANSFER_AMOUNT)} · Cap now:{" "}
+                {formatNaira(effectiveInputCap)}
               </span>
             </div>
 
             <div className="relative">
-
               <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-lg">
                 ₦
               </span>
@@ -1412,21 +1404,16 @@ function TransferPage() {
                 className="w-full bg-slate-950 border border-slate-800 rounded-2xl pl-9 pr-4 py-3.5 text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500 font-extrabold text-lg shadow-inner"
                 required
               />
-
             </div>
 
             {limitNotice && (
-              <p className="mt-2 text-xs text-amber-300">
-                {limitNotice}
-              </p>
+              <p className="mt-2 text-xs text-amber-300">{limitNotice}</p>
             )}
-
           </div>
 
           {/* NARRATION */}
 
           <div>
-
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
               Note / Narration (Optional)
             </label>
@@ -1439,27 +1426,26 @@ function TransferPage() {
               className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500 text-sm shadow-inner"
               maxLength={100}
             />
-
           </div>
 
           <button
             type="submit"
-            disabled={!verifiedRecipient || verifying || checkingPinStatus || allowance.is_frozen}
+            disabled={
+              !verifiedRecipient ||
+              verifying ||
+              checkingPinStatus ||
+              allowance.is_frozen
+            }
             className="w-full mt-2 flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 py-4 text-sm font-extrabold text-slate-950 shadow-lg shadow-cyan-500/20 hover:brightness-110 transition disabled:opacity-50"
           >
-
             {checkingPinStatus ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Send className="h-4 w-4" />
             )}
-
             Proceed to Transfer
-
           </button>
-
         </form>
-
       )}
 
       {/* VIEW ALL RECIPIENTS MODAL */}
@@ -1669,7 +1655,8 @@ function TransferPage() {
 
               {newRecipientVerified && (
                 <p className="mt-1.5 text-xs font-semibold text-cyan-300">
-                  Verified: {newRecipientVerified.full_name} ({newRecipientVerified.vevu_id})
+                  Verified: {newRecipientVerified.full_name} (
+                  {newRecipientVerified.vevu_id})
                 </p>
               )}
             </div>
@@ -1733,8 +1720,11 @@ function TransferPage() {
                 <strong className="text-slate-200">
                   {pendingRemoveRecipient.beneficiary_name}
                 </strong>{" "}
-                (<span className="font-mono">{pendingRemoveRecipient.recipient}</span>)
-                from your saved recipients list?
+                (
+                <span className="font-mono">
+                  {pendingRemoveRecipient.recipient}
+                </span>
+                ) from your saved recipients list?
               </p>
             </div>
 
@@ -1813,79 +1803,82 @@ function TransferPage() {
 
       {/* ADD TO RECIPIENTS POPUP */}
 
-      {saveRecipientModalOpen && (confirmedSuccessRecipient || verifiedRecipient) && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Add to recipients"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
-        >
-          <form
-            onSubmit={handleSaveRecipient}
-            className="w-full max-w-sm rounded-3xl border border-cyan-500/30 bg-slate-900 p-6 text-white shadow-2xl space-y-4"
+      {saveRecipientModalOpen &&
+        (confirmedSuccessRecipient || verifiedRecipient) && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add to recipients"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
           >
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-400">
-              <UserPlus className="h-6 w-6" />
-            </div>
+            <form
+              onSubmit={handleSaveRecipient}
+              className="w-full max-w-sm rounded-3xl border border-cyan-500/30 bg-slate-900 p-6 text-white shadow-2xl space-y-4"
+            >
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-400">
+                <UserPlus className="h-6 w-6" />
+              </div>
 
-            <div className="text-center space-y-1">
-              <h3 className="text-lg font-bold text-white">
-                Add to Recipients?
-              </h3>
-              <p className="text-xs text-slate-400">
-                Save{" "}
-                <strong className="text-cyan-300">
-                  {(confirmedSuccessRecipient || verifiedRecipient)!.full_name}
-                </strong>{" "}
-                (
-                <span className="font-mono">
-                  {(confirmedSuccessRecipient || verifiedRecipient)!.vevu_id}
-                </span>
-                ) for faster one-tap transfers next time.
-              </p>
-            </div>
+              <div className="text-center space-y-1">
+                <h3 className="text-lg font-bold text-white">
+                  Add to Recipients?
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Save{" "}
+                  <strong className="text-cyan-300">
+                    {(confirmedSuccessRecipient || verifiedRecipient)!.full_name}
+                  </strong>{" "}
+                  (
+                  <span className="font-mono">
+                    {(confirmedSuccessRecipient || verifiedRecipient)!.vevu_id}
+                  </span>
+                  ) for faster one-tap transfers next time.
+                </p>
+              </div>
 
-            <div>
-              <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                Recipient Name
-              </label>
-              <input
-                type="text"
-                value={recipientAlias}
-                onChange={(e) => setRecipientAlias(e.target.value)}
-                placeholder={(confirmedSuccessRecipient || verifiedRecipient)!.full_name}
-                maxLength={60}
-                className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-white text-sm focus:outline-none focus:border-cyan-500"
-              />
-            </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                  Recipient Name
+                </label>
+                <input
+                  type="text"
+                  value={recipientAlias}
+                  onChange={(e) => setRecipientAlias(e.target.value)}
+                  placeholder={
+                    (confirmedSuccessRecipient || verifiedRecipient)!.full_name
+                  }
+                  maxLength={60}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-white text-sm focus:outline-none focus:border-cyan-500"
+                />
+              </div>
 
-            <div className="flex gap-3 pt-1">
-              <button
-                type="button"
-                onClick={() => setSaveRecipientModalOpen(false)}
-                disabled={savingRecipient}
-                className="flex-1 rounded-2xl bg-slate-800 py-3 text-sm font-bold text-slate-300 hover:bg-slate-700 transition disabled:opacity-50"
-              >
-                Skip
-              </button>
+              <div className="flex gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setSaveRecipientModalOpen(false)}
+                  disabled={savingRecipient}
+                  className="flex-1 rounded-2xl bg-slate-800 py-3 text-sm font-bold text-slate-300 hover:bg-slate-700 transition disabled:opacity-50"
+                >
+                  Skip
+                </button>
 
-              <button
-                type="submit"
-                disabled={savingRecipient}
-                className="flex-1 flex items-center justify-center gap-1.5 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 py-3 text-sm font-extrabold text-slate-950 shadow-lg shadow-cyan-500/20 hover:brightness-110 transition disabled:opacity-50"
-              >
-                {savingRecipient ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  "Save Recipient"
-                )}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
+                <button
+                  type="submit"
+                  disabled={savingRecipient}
+                  className="flex-1 flex items-center justify-center gap-1.5 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 py-3 text-sm font-extrabold text-slate-950 shadow-lg shadow-cyan-500/20 hover:brightness-110 transition disabled:opacity-50"
+                >
+                  {savingRecipient ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    "Save Recipient"
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
 
-      {/* STEP 2: SIX-DIGIT PIN CONFIRMATION */}
+      {/* STEP 2A: BIOMETRIC AUTHORIZATION */}
 
       {step === "biometric" && (
         <div className="rounded-3xl bg-slate-900/90 border border-cyan-500/30 p-6 space-y-5 shadow-xl backdrop-blur text-center">
@@ -1894,45 +1887,79 @@ function TransferPage() {
           </div>
           <h2 className="text-lg font-bold text-white">Authorize with fingerprint</h2>
           <p className="text-xs text-slate-400">
-            Confirm your transfer of ₦{Number(amount).toLocaleString("en-NG")} to {verifiedRecipient?.full_name}.
+            Confirm your transfer of ₦
+            {Number(amount).toLocaleString("en-NG")} to{" "}
+            <span className="text-cyan-300 font-bold">
+              {verifiedRecipient?.full_name}
+            </span>
+            .
           </p>
-          {biometricError && <p role="alert" className="text-xs text-rose-300">{biometricError}</p>}
-          <button type="button" onClick={handleBiometricTransfer} disabled={loading} className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 py-3.5 text-sm font-extrabold text-slate-950 disabled:opacity-50">
-            {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <ShieldCheck className="h-5 w-5" />}
+          {biometricError && (
+            <p role="alert" className="text-xs text-rose-300">
+              {biometricError}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={handleBiometricTransfer}
+            disabled={loading}
+            className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 py-3.5 text-sm font-extrabold text-slate-950 disabled:opacity-50"
+          >
+            {loading ? (
+              <Loader2 className="h-5 w-5 animate-spin" />
+            ) : (
+              <ShieldCheck className="h-5 w-5" />
+            )}
             {loading ? "Waiting for fingerprint..." : "Continue with fingerprint"}
           </button>
-          <button type="button" disabled={loading} onClick={async () => {
-            const pinExists = await checkUserHasPin();
-            if (pinExists === false) { setPinSetupPromptOpen(true); return; }
-            setPin(""); setBiometricError(""); setStep("pin");
-          }} className="w-full rounded-2xl border border-slate-700 bg-slate-800 py-3 text-sm font-bold text-slate-200 hover:bg-slate-700 disabled:opacity-50">
+          <button
+            type="button"
+            disabled={loading}
+            onClick={async () => {
+              const pinExists = await checkUserHasPin();
+              if (pinExists === false) {
+                setPinSetupPromptOpen(true);
+                return;
+              }
+              setPin("");
+              setBiometricError("");
+              setStep("pin");
+            }}
+            className="w-full rounded-2xl border border-slate-700 bg-slate-800 py-3 text-sm font-bold text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+          >
             Use PIN instead
           </button>
-          <button type="button" disabled={loading} onClick={() => { setStep("input"); setBiometricAuthorization(null); }} className="text-xs text-slate-400 underline underline-offset-4">Back</button>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => {
+              setStep("input");
+              setBiometricAuthorization(null);
+              setBiometricError("");
+            }}
+            className="text-xs text-slate-400 underline underline-offset-4"
+          >
+            Back
+          </button>
         </div>
       )}
 
-      {step === "pin" && (
+      {/* STEP 2B: SIX-DIGIT PIN CONFIRMATION */}
 
+      {step === "pin" && (
         <form
           onSubmit={handleInitiateTransfer}
           className="rounded-3xl bg-slate-900/90 border border-cyan-500/30 p-6 space-y-5 shadow-xl backdrop-blur text-center"
         >
-
           <div className="mx-auto w-12 h-12 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400 mb-2">
             <Lock className="h-6 w-6" />
           </div>
 
-          <h2 className="text-lg font-bold text-white">
-            Enter Transaction PIN
-          </h2>
+          <h2 className="text-lg font-bold text-white">Enter Transaction PIN</h2>
 
           <p className="text-xs text-slate-400">
-            Enter your 6-digit PIN to authorize
-            transferring ₦
-            {Number(amount).toLocaleString("en-NG")}
-            {" "}to{" "}
-
+            Enter your 6-digit PIN to authorize transferring ₦
+            {Number(amount).toLocaleString("en-NG")} to{" "}
             <span className="text-cyan-300 font-bold">
               {verifiedRecipient?.full_name}
             </span>
@@ -1946,9 +1973,7 @@ function TransferPage() {
             placeholder="••••••"
             value={pin}
             onChange={(e) =>
-              setPin(
-                e.target.value.replace(/\D/g, "").slice(0, 6)
-              )
+              setPin(e.target.value.replace(/\D/g, "").slice(0, 6))
             }
             className="w-48 mx-auto bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-center text-white text-2xl tracking-widest focus:outline-none focus:border-cyan-500 font-mono shadow-inner"
             required
@@ -1956,7 +1981,6 @@ function TransferPage() {
           />
 
           <div className="flex gap-3 pt-2">
-
             <button
               type="button"
               onClick={() => {
@@ -1974,58 +1998,50 @@ function TransferPage() {
               disabled={loading || pin.length !== 6}
               className="w-1/2 flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 py-3.5 text-sm font-extrabold text-slate-950 shadow-lg shadow-cyan-500/20 hover:brightness-110 transition disabled:opacity-50"
             >
-
               {loading ? (
                 <Loader2 className="h-5 w-5 animate-spin" />
               ) : (
                 "Confirm Transfer"
               )}
-
             </button>
-
           </div>
-
         </form>
-
       )}
 
       {/* STEP 3: SUCCESS SCREEN */}
 
       {step === "success" && (
-
         <div className="rounded-3xl bg-slate-900/90 border border-emerald-500/30 p-8 space-y-6 shadow-2xl backdrop-blur text-center animate-fadeIn">
-
           <div className="space-y-2">
-
             <span className="inline-block px-3.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold uppercase tracking-wider">
-              Transfer to {confirmedSuccessRecipient?.full_name || verifiedRecipient?.full_name}
+              Transfer to{" "}
+              {confirmedSuccessRecipient?.full_name ||
+                verifiedRecipient?.full_name}
             </span>
 
             <h2 className="text-2xl font-black text-white">
               ₦
-              {Number(confirmedSuccessAmount || amount || 0).toLocaleString("en-NG", {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              })}
+              {Number(confirmedSuccessAmount || amount || 0).toLocaleString(
+                "en-NG",
+                {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                }
+              )}
             </h2>
-
           </div>
 
           <div className="mx-auto w-20 h-20 rounded-full bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center text-slate-950 shadow-lg shadow-emerald-500/30 animate-bounce">
-
             <CheckCircle2 className="h-10 w-10 text-slate-950 stroke-[2.5]" />
-
           </div>
 
           <div className="space-y-1">
-
             <p className="text-sm font-bold text-emerald-400">
               Transfer Successful!
             </p>
 
             <p className="text-xs text-slate-400">
-              Funds have been credited instantly to
-              the recipient's wallet.
+              Funds have been credited instantly to the recipient's wallet.
             </p>
 
             {transferReference && (
@@ -2033,24 +2049,18 @@ function TransferPage() {
                 Reference: {transferReference}
               </p>
             )}
-
           </div>
 
           <div className="pt-4 flex flex-col gap-3">
-
             <Link
               to="/dashboard"
               className="w-full py-4 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 font-extrabold text-sm shadow-lg shadow-cyan-500/20 hover:brightness-110 transition block"
             >
               Back to Dashboard
             </Link>
-
           </div>
-
         </div>
-
       )}
-
     </div>
   );
 }
