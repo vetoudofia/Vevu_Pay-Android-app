@@ -2256,3 +2256,4 @@ function PurchasePage() {
     </div>
   );
 }
+
