@@ -37,6 +37,7 @@ type PendingDownload = {
 const CHANNEL = import.meta.env.VITE_DISTRIBUTION_CHANNEL === "play" ? "play" : "direct";
 const FALLBACK_VERSION_CODE = Number.parseInt(import.meta.env.VITE_APP_VERSION_CODE || "1", 10);
 const PENDING_DOWNLOAD_KEY = "vevupay_pending_app_release_download";
+const SKIPPED_RELEASES_KEY = "vevupay_skipped_app_releases";
 
 function readPendingDownload(): PendingDownload | null {
   try {
@@ -47,11 +48,36 @@ function readPendingDownload(): PendingDownload | null {
       typeof value.release_id !== "string" ||
       (value.distribution_channel !== "direct" && value.distribution_channel !== "play") ||
       !Number.isSafeInteger(value.target_version_code)
-    ) return null;
+    ) {
+      return null;
+    }
     return value;
   } catch {
     return null;
   }
+}
+
+function readSkippedReleases(): string[] {
+  try {
+    const raw = window.localStorage.getItem(SKIPPED_RELEASES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistSkippedRelease(releaseKey: string): string[] {
+  const existing = readSkippedReleases();
+  if (existing.includes(releaseKey)) return existing;
+  const next = [...existing, releaseKey];
+  try {
+    window.localStorage.setItem(SKIPPED_RELEASES_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage errors
+  }
+  return next;
 }
 
 function formatFileSize(bytes: number | null): string | null {
@@ -71,7 +97,7 @@ export function AppReleaseManager() {
   const [mandatory, setMandatory] = useState(false);
   const [checking, setChecking] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [dismissedReleaseId, setDismissedReleaseId] = useState<string | null>(null);
+  const [skippedReleaseKeys, setSkippedReleaseKeys] = useState<string[]>(() => readSkippedReleases());
   const currentVersionCodeRef = useRef(FALLBACK_VERSION_CODE);
   const checkInFlightRef = useRef(false);
 
@@ -82,7 +108,11 @@ export function AppReleaseManager() {
       ? parsedBuild
       : FALLBACK_VERSION_CODE;
     currentVersionCodeRef.current = versionCode;
-    return { versionName: nativeInfo.version || import.meta.env.VITE_APP_VERSION || "1.0.0", versionCode, appBuild: nativeInfo.build || String(versionCode) };
+    return {
+      versionName: nativeInfo.version || import.meta.env.VITE_APP_VERSION || "1.0.0",
+      versionCode,
+      appBuild: nativeInfo.build || String(versionCode),
+    };
   }, []);
 
   const recordDownloadEvent = useCallback(async (
@@ -157,7 +187,6 @@ export function AppReleaseManager() {
       });
       if (error) throw error;
       if (data?.success && data.update_available && data.release) {
-        setDismissedReleaseId((previous) => previous === data.release?.id ? previous : null);
         setRelease(data.release);
         setMandatory(data.mandatory_update === true);
       } else {
@@ -165,7 +194,6 @@ export function AppReleaseManager() {
         setMandatory(false);
       }
     } catch (error) {
-      // Do not lock users out when the release service or network is unavailable.
       console.warn("VevuPay update check failed", error);
     } finally {
       checkInFlightRef.current = false;
@@ -223,7 +251,6 @@ export function AppReleaseManager() {
       try {
         await recordDownloadEvent(pending, "requested", currentVersionCodeRef.current, deviceId);
       } catch (error) {
-        // Analytics failure must never prevent a user from obtaining an update.
         console.warn("Download request tracking failed", error);
       }
       window.localStorage.setItem(PENDING_DOWNLOAD_KEY, JSON.stringify(pending));
@@ -233,17 +260,24 @@ export function AppReleaseManager() {
     }
   };
 
-  if (Capacitor.getPlatform() !== "android" || !release || (!mandatory && dismissedReleaseId === release.id)) return null;
+  const releaseKey = release ? `${release.id}:${release.version_code}` : null;
+  const isSkipped = Boolean(releaseKey && skippedReleaseKeys.includes(releaseKey));
+
+  if (Capacitor.getPlatform() !== "android" || !release || (!mandatory && isSkipped)) {
+    return null;
+  }
 
   return (
     <div className="fixed inset-0 z-[10000] flex min-h-[100dvh] items-center justify-center overflow-y-auto bg-[#071126] px-5 py-8 text-white">
       <section className="w-full max-w-md rounded-3xl border border-white/10 bg-[#101d38] p-6 shadow-2xl">
         <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-500/15 text-2xl" aria-hidden="true">↻</div>
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-300">VevuPay update</p>
-        <h1 className="mt-2 text-2xl font-bold">{mandatory ? "Update required" : "A new version is available"}</h1>
+        <h1 className="mt-2 text-2xl font-bold">
+          {mandatory ? "Update required" : "A new version is available"}
+        </h1>
         <p className="mt-2 text-sm leading-6 text-slate-300">
-          Version {release.version_name} is ready to install.
-          {mandatory ? " You must update VevuPay before continuing." : " Update now to get the latest improvements."}
+          Version {release.version_name} is available. Go download now to get the latest release.
+          {mandatory ? " You must update VevuPay before continuing." : ""}
         </p>
         {release.release_notes?.trim() && (
           <div className="mt-5 rounded-2xl bg-white/5 p-4">
@@ -252,6 +286,7 @@ export function AppReleaseManager() {
           </div>
         )}
         <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-400">
+          <span>Version {release.version_name}</span>
           <span>Build {release.version_code}</span>
           {formatFileSize(release.file_size_bytes) && <span>{formatFileSize(release.file_size_bytes)}</span>}
         </div>
@@ -262,15 +297,18 @@ export function AppReleaseManager() {
           disabled={checking}
           className="mt-6 w-full rounded-xl bg-blue-500 px-5 py-3.5 text-sm font-bold text-white transition hover:bg-blue-400 disabled:opacity-60"
         >
-          {checking ? "Checking…" : CHANNEL === "play" ? "Update in Google Play" : "Download update"}
+          {checking ? "Checking…" : "Download Now"}
         </button>
-        {!mandatory && (
+        {!mandatory && releaseKey && (
           <button
             type="button"
-            onClick={() => setDismissedReleaseId(release.id)}
+            onClick={() => {
+              const updated = persistSkippedRelease(releaseKey);
+              setSkippedReleaseKeys(updated);
+            }}
             className="mt-3 w-full rounded-xl px-5 py-3 text-sm font-semibold text-slate-300 hover:bg-white/5"
           >
-            Remind me later
+            Skip
           </button>
         )}
       </section>
