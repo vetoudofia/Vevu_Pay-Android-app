@@ -3,6 +3,13 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import {
+  authorizeTransactionWithBiometric,
+  getTransactionBiometricSettings,
+  sha256Hex,
+  type TransactionBiometricAuthorization,
+} from "@/native/transaction-biometric";
+import { isNativeAndroid } from "@/native/biometric";
 import { toast } from "sonner";
 
 import {
@@ -29,7 +36,7 @@ export const Route = createFileRoute("/_authenticated/transfer")({
   component: TransferPage,
 });
 
-type Step = "input" | "pin" | "success";
+type Step = "input" | "biometric" | "pin" | "success";
 
 interface VerifiedRecipient {
   id: string;
@@ -145,6 +152,9 @@ function TransferPage() {
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [pin, setPin] = useState("");
+  const [biometricDeviceId, setBiometricDeviceId] = useState<string | null>(null);
+  const [biometricError, setBiometricError] = useState("");
+  const [biometricAuthorization, setBiometricAuthorization] = useState<TransactionBiometricAuthorization | null>(null);
 
   // Recipient verification & saved recipients
   const [verifiedRecipient, setVerifiedRecipient] =
@@ -890,21 +900,40 @@ function TransferPage() {
       return;
     }
 
+    setPin("");
+    setBiometricAuthorization(null);
+    setBiometricError("");
+    setTransferId(null);
+    setRequestKey(null);
+
+    try {
+      const settings = await getTransactionBiometricSettings();
+      if (
+        isNativeAndroid() &&
+        settings.biometric_enabled &&
+        settings.transaction_biometrics_enabled &&
+        settings.biometric_device_id
+      ) {
+        setBiometricDeviceId(settings.biometric_device_id);
+        setStep("biometric");
+        return;
+      }
+      setBiometricDeviceId(null);
+    } catch (error: any) {
+      toast.error(error?.message || "Unable to check transaction biometric settings.");
+    }
+
     const pinExists = await checkUserHasPin();
     if (pinExists === false) {
       setPinSetupPromptOpen(true);
       return;
     }
-
-    setPin("");
-    setTransferId(null);
-    setRequestKey(null);
-
     setStep("pin");
   };
 
   const handleInitiateTransfer = async (
-    e: React.FormEvent
+    e: React.FormEvent,
+    biometricAuth: TransactionBiometricAuthorization | null = null,
   ) => {
     e.preventDefault();
 
@@ -939,7 +968,7 @@ function TransferPage() {
       return;
     }
 
-    if (!/^\d{6}$/.test(pin)) {
+    if (!biometricAuth && !/^\d{6}$/.test(pin)) {
       toast.error(
         "Please enter your 6-digit transaction PIN."
       );
@@ -967,8 +996,9 @@ function TransferPage() {
             narration:
               note.trim() ||
               "Peer-to-peer wallet transfer",
-            transactionPin: pin,
+            transactionPin: biometricAuth ? "" : pin,
             requestKey: currentRequestKey,
+            ...(biometricAuth ?? {}),
           },
         }
       );
@@ -1029,6 +1059,43 @@ function TransferPage() {
       setLoading(false);
     }
   };
+
+  const handleBiometricTransfer = async () => {
+      if (!verifiedRecipient || !biometricDeviceId || loading) return;
+      setLoading(true);
+      setBiometricError("");
+      try {
+        const currentRequestKey = requestKey || crypto.randomUUID();
+        if (!requestKey) setRequestKey(currentRequestKey);
+        const numAmount = Number(amount);
+        const narration = note.trim() || "Peer-to-peer wallet transfer";
+        const { data: authData, error: authError } = await supabase.auth.getUser();
+        if (authError || !authData.user?.id) throw new Error("Your session has expired. Please sign in again.");
+        const canonical = JSON.stringify([
+          "VEVUPAY-TRANSFER-AUTH-V1",
+          authData.user.id,
+          currentRequestKey,
+          Math.round(numAmount * 100),
+          verifiedRecipient.vevu_id.trim(),
+          narration.slice(0, 100),
+        ]);
+        const payloadHash = await sha256Hex(canonical);
+        const authorization = await authorizeTransactionWithBiometric({
+          deviceId: biometricDeviceId,
+          transactionType: "transfer",
+          transactionReference: currentRequestKey,
+          transactionPayloadHash: payloadHash,
+        });
+        setBiometricAuthorization(authorization);
+        await handleInitiateTransfer({ preventDefault: () => {} } as React.FormEvent, authorization);
+      } catch (error: any) {
+        const message = error?.message || "Fingerprint authorization could not be completed.";
+        setBiometricError(message);
+        toast.error(message);
+      } finally {
+        setLoading(false);
+      }
+    };
 
   return (
     <div className="space-y-6 max-w-xl mx-auto pb-12">
@@ -1819,6 +1886,31 @@ function TransferPage() {
       )}
 
       {/* STEP 2: SIX-DIGIT PIN CONFIRMATION */}
+
+      {step === "biometric" && (
+        <div className="rounded-3xl bg-slate-900/90 border border-cyan-500/30 p-6 space-y-5 shadow-xl backdrop-blur text-center">
+          <div className="mx-auto w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-300">
+            <ShieldCheck className="h-8 w-8" />
+          </div>
+          <h2 className="text-lg font-bold text-white">Authorize with fingerprint</h2>
+          <p className="text-xs text-slate-400">
+            Confirm your transfer of ₦{Number(amount).toLocaleString("en-NG")} to {verifiedRecipient?.full_name}.
+          </p>
+          {biometricError && <p role="alert" className="text-xs text-rose-300">{biometricError}</p>}
+          <button type="button" onClick={handleBiometricTransfer} disabled={loading} className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 py-3.5 text-sm font-extrabold text-slate-950 disabled:opacity-50">
+            {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <ShieldCheck className="h-5 w-5" />}
+            {loading ? "Waiting for fingerprint..." : "Continue with fingerprint"}
+          </button>
+          <button type="button" disabled={loading} onClick={async () => {
+            const pinExists = await checkUserHasPin();
+            if (pinExists === false) { setPinSetupPromptOpen(true); return; }
+            setPin(""); setBiometricError(""); setStep("pin");
+          }} className="w-full rounded-2xl border border-slate-700 bg-slate-800 py-3 text-sm font-bold text-slate-200 hover:bg-slate-700 disabled:opacity-50">
+            Use PIN instead
+          </button>
+          <button type="button" disabled={loading} onClick={() => { setStep("input"); setBiometricAuthorization(null); }} className="text-xs text-slate-400 underline underline-offset-4">Back</button>
+        </div>
+      )}
 
       {step === "pin" && (
 
