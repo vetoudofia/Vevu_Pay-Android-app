@@ -38,25 +38,12 @@ if (!updaterManifest.includes('android:name="androidx.core.content.FileProvider"
   await writeFile(manifestFile, updaterManifest);
 }
 
-// Add permissions required by the native biometric and direct APK updater.
-// REQUEST_INSTALL_PACKAGES is required before PackageManager.canRequestPackageInstalls()
-// can be called on Android 8.0+ for apps that install their own direct updates.
+// Add runtime biometric permission (idempotent).
 let manifest = await readFile(manifestFile, "utf8");
-const requiredPermissions = [
-  "android.permission.USE_BIOMETRIC",
-  "android.permission.REQUEST_INSTALL_PACKAGES",
-];
-let permissionsChanged = false;
-for (const permission of requiredPermissions) {
-  if (!manifest.includes(`android:name="${permission}"`)) {
-    manifest = manifest.replace(
-      /<manifest\b[^>]*>/,
-      match => `${match}\n    <uses-permission android:name="${permission}" />`,
-    );
-    permissionsChanged = true;
-  }
+if (!manifest.includes("android.permission.USE_BIOMETRIC")) {
+  manifest = manifest.replace(/<manifest\b[^>]*>/, match => `${match}\n    <uses-permission android:name="android.permission.USE_BIOMETRIC" />`);
+  await writeFile(manifestFile, manifest);
 }
-if (permissionsChanged) await writeFile(manifestFile, manifest);
 
 
 // Apply the release identity used by the in-app updater. Always increment
