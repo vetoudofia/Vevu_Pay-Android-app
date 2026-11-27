@@ -10,6 +10,7 @@ import {
   Lock,
   ShieldAlert,
   LifeBuoy,
+  Fingerprint,
   X,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
@@ -56,6 +57,124 @@ interface LoginRateLimitResponse {
     access_token: string;
     refresh_token: string;
   };
+}
+
+interface BiometricChallengeResponse {
+  success: boolean;
+  error?: string;
+  challenge_id?: string;
+  challenge?: string;
+  signed_message?: string;
+  expires_at?: string;
+  algorithm?: string;
+}
+
+interface BiometricVerifyResponse {
+  success: boolean;
+  error?: string;
+  email?: string;
+  email_otp?: string;
+  retryAfterSeconds?: number;
+}
+
+const BIOMETRIC_PREF_KEY = 'vevupay_biometric_login_pref';
+const DEVICE_ID_STORAGE_KEYS = [
+  'vevupay_device_id',
+  'device_id',
+];
+
+function readSavedBiometricPref(): {
+  email: string;
+  deviceId: string;
+} | null {
+  try {
+    const raw = localStorage.getItem(BIOMETRIC_PREF_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      typeof parsed?.email === 'string' &&
+      parsed.email.trim() &&
+      typeof parsed?.deviceId === 'string' &&
+      parsed.deviceId.trim()
+    ) {
+      return {
+        email: parsed.email.trim().toLowerCase(),
+        deviceId: parsed.deviceId.trim(),
+      };
+    }
+  } catch {
+    // Ignore storage parse errors.
+  }
+  return null;
+}
+
+function saveBiometricPref(loginEmail: string, deviceId?: string | null) {
+  try {
+    const existing = readSavedBiometricPref();
+    const resolvedDeviceId =
+      (typeof deviceId === 'string' && deviceId.trim()) ||
+      existing?.deviceId ||
+      getStoredDeviceId() ||
+      '';
+
+    if (loginEmail.trim() && resolvedDeviceId) {
+      localStorage.setItem(
+        BIOMETRIC_PREF_KEY,
+        JSON.stringify({
+          email: loginEmail.trim().toLowerCase(),
+          deviceId: resolvedDeviceId,
+        })
+      );
+    }
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function getStoredDeviceId(): string {
+  try {
+    for (const key of DEVICE_ID_STORAGE_KEYS) {
+      const val = localStorage.getItem(key);
+      if (val && val.trim()) return val.trim();
+    }
+  } catch {
+    // Ignore storage errors.
+  }
+  return '';
+}
+
+/**
+ * Signs `signedMessage` using the Android Keystore ECDSA_P256_SHA256 biometric key.
+ * Connects to a native/WebView bridge if available on `window`.
+ */
+async function signBiometricLoginChallenge(params: {
+  email: string;
+  deviceId: string;
+  challengeId: string;
+  challenge: string;
+  signedMessage: string;
+}): Promise<string> {
+  const w = window as any;
+
+  if (typeof w?.VevuBiometricBridge?.signLoginChallenge === 'function') {
+    const sig = await w.VevuBiometricBridge.signLoginChallenge(
+      JSON.stringify(params)
+    );
+    if (typeof sig === 'string' && sig.trim()) {
+      return sig.trim();
+    }
+  }
+
+  if (typeof w?.AndroidBiometric?.signChallenge === 'function') {
+    const sig = await w.AndroidBiometric.signChallenge(params.signedMessage);
+    if (typeof sig === 'string' && sig.trim()) {
+      return sig.trim();
+    }
+  }
+
+  throw new Error(
+    'Biometric prompt is not available in this browser environment. Please use your email and password.'
+  );
 }
 
 function readPendingSignup(): {
@@ -118,13 +237,14 @@ function AuthPage() {
   const navigate = useNavigate();
 
   const initialPendingSignup = readPendingSignup();
+  const initialBioPref = readSavedBiometricPref();
 
   const [mode, setMode] = useState<Mode>(() =>
     initialPendingSignup ? 'signup-otp' : 'signin'
   );
 
   const [email, setEmail] = useState(
-    () => initialPendingSignup?.email || ''
+    () => initialPendingSignup?.email || initialBioPref?.email || ''
   );
 
   const [password, setPassword] = useState('');
@@ -146,6 +266,7 @@ function AuthPage() {
   const [showNewPw, setShowNewPw] = useState(false);
 
   const [busy, setBusy] = useState(false);
+  const [biometricBusy, setBiometricBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const [agreedToTerms, setAgreedToTerms] = useState(false);
@@ -403,21 +524,14 @@ function AuthPage() {
     };
   };
 
-  const finalizeVerifiedSignIn = async (
+  const finalizeVerifiedSession = async (
+    signedInUser: { id: string; email?: string | null },
     loginEmail: string,
-    loginPassword: string,
     options?: {
       onPostVerifySuccess?: (userId: string) => Promise<void> | void;
       fallbackSignInMessage?: string;
     }
   ): Promise<boolean> => {
-    const loginResult = await signInWithServerRateLimit(
-      loginEmail,
-      loginPassword
-    );
-
-    const signedInUser = loginResult.user;
-
     const { data: profile, error: profileErr } = await supabase
       .from('profiles')
       .select('is_verified, is_frozen')
@@ -454,6 +568,8 @@ function AuthPage() {
       return false;
     }
 
+    saveBiometricPref(loginEmail);
+
     if (options?.onPostVerifySuccess) {
       await options.onPostVerifySuccess(signedInUser.id);
     }
@@ -461,6 +577,138 @@ function AuthPage() {
     clearSensitiveFields();
 
     return true;
+  };
+
+  const finalizeVerifiedSignIn = async (
+    loginEmail: string,
+    loginPassword: string,
+    options?: {
+      onPostVerifySuccess?: (userId: string) => Promise<void> | void;
+      fallbackSignInMessage?: string;
+    }
+  ): Promise<boolean> => {
+    const loginResult = await signInWithServerRateLimit(
+      loginEmail,
+      loginPassword
+    );
+
+    return finalizeVerifiedSession(loginResult.user, loginEmail, options);
+  };
+
+  const handleBiometricSignIn = async () => {
+    if (busy || biometricBusy) return;
+
+    setErrorMessage(null);
+
+    const savedPref = readSavedBiometricPref();
+    const targetEmail = (email || savedPref?.email || '').trim().toLowerCase();
+    const targetDeviceId = (savedPref?.deviceId || getStoredDeviceId()).trim();
+
+    if (!targetEmail) {
+      setErrorMessage(
+        'Enter your email address first to sign in with biometrics.'
+      );
+      return;
+    }
+
+    if (!targetDeviceId) {
+      setErrorMessage(
+        'No enrolled device ID found on this device. Sign in with email and password first.'
+      );
+      return;
+    }
+
+    setBiometricBusy(true);
+
+    try {
+      const challengeRes =
+        await callPublicEdgeFunction<BiometricChallengeResponse>(
+          'biometric-login',
+          {
+            action: 'create_challenge',
+            email: targetEmail,
+            device_id: targetDeviceId,
+          }
+        );
+
+      if (
+        !challengeRes?.success ||
+        !challengeRes?.challenge_id ||
+        !challengeRes?.challenge ||
+        !challengeRes?.signed_message
+      ) {
+        throw new Error(
+          challengeRes?.error || 'Could not start biometric sign-in.'
+        );
+      }
+
+      const signature = await signBiometricLoginChallenge({
+        email: targetEmail,
+        deviceId: targetDeviceId,
+        challengeId: challengeRes.challenge_id,
+        challenge: challengeRes.challenge,
+        signedMessage: challengeRes.signed_message,
+      });
+
+      const verifyRes =
+        await callPublicEdgeFunction<BiometricVerifyResponse>(
+          'biometric-login',
+          {
+            action: 'verify_and_login',
+            email: targetEmail,
+            device_id: targetDeviceId,
+            challenge_id: challengeRes.challenge_id,
+            challenge: challengeRes.challenge,
+            signature,
+          }
+        );
+
+      if (
+        !verifyRes?.success ||
+        !verifyRes?.email ||
+        !verifyRes?.email_otp
+      ) {
+        throw new Error(
+          verifyRes?.error || 'Biometric sign-in verification failed.'
+        );
+      }
+
+      const { data: otpData, error: otpError } = await supabase.auth.verifyOtp({
+        email: verifyRes.email,
+        token: verifyRes.email_otp,
+        type: 'email',
+      });
+
+      if (otpError || !otpData.user) {
+        throw new Error(
+          otpError?.message || 'Unable to establish your session.'
+        );
+      }
+
+      saveBiometricPref(verifyRes.email, targetDeviceId);
+
+      const loggedIn = await finalizeVerifiedSession(
+        otpData.user,
+        verifyRes.email,
+        {
+          fallbackSignInMessage:
+            'Please verify your email address to continue.',
+        }
+      );
+
+      if (!loggedIn) {
+        return;
+      }
+
+      toast.success('Signed in with biometrics!');
+      navigate({ to: '/dashboard', replace: true });
+    } catch (err: any) {
+      setErrorMessage(
+        getSafeAuthError(err, 'Biometric sign-in failed. Please try again.')
+      );
+    } finally {
+      setBiometricBusy(false);
+    }
   };
 
   const handleTriggerSignupOTP = async (signupEmail: string) => {
@@ -773,7 +1021,7 @@ function AuthPage() {
   const handleSignInOrSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (busy) return;
+    if (busy || biometricBusy) return;
 
     setErrorMessage(null);
     setBusy(true);
@@ -947,7 +1195,7 @@ function AuthPage() {
     <button
       type="button"
       onClick={onClick}
-      disabled={busy || resendSeconds > 0}
+      disabled={busy || biometricBusy || resendSeconds > 0}
       className="w-full rounded-lg py-2 text-sm font-semibold text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-60"
     >
       {busy ? (
@@ -1231,7 +1479,7 @@ function AuthPage() {
 
                     <button
                       type="submit"
-                      disabled={busy}
+                      disabled={busy || biometricBusy}
                       className="btn-primary mt-2 w-full py-3 disabled:opacity-50"
                     >
                       {busy ? (
@@ -1242,6 +1490,26 @@ function AuthPage() {
                         'Create Account'
                       )}
                     </button>
+
+                    {mode === 'signin' && (
+                      <button
+                        type="button"
+                        onClick={handleBiometricSignIn}
+                        disabled={busy || biometricBusy}
+                        className="flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-secondary/50 py-3 text-sm font-semibold text-foreground transition hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {biometricBusy ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Fingerprint className="h-4 w-4 text-primary" />
+                        )}
+                        <span>
+                          {biometricBusy
+                            ? 'Verifying biometrics...'
+                            : 'Sign in with fingerprint'}
+                        </span>
+                      </button>
+                    )}
                   </form>
                 </>
               )}
