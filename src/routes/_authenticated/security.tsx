@@ -1268,7 +1268,14 @@ function SecurityPage() {
                 <span className={`rounded-full px-3 py-1 text-xs font-semibold ${(biometricSettings?.biometric_enabled ?? biometricSettings?.biometrics_enabled) === true ? "bg-green-500/10 text-green-600" : "bg-secondary text-muted-foreground"}`}>
                   {(biometricSettings?.biometric_enabled ?? biometricSettings?.biometrics_enabled) === true ? "On" : "Off"}
                 </span>
-                <button type="button" disabled title="Secure biometric enrollment is not available yet" className="rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground opacity-50">
+                <button
+                  type="button"
+                  onClick={() => {
+                    toast.info("Biometric enrollment must be completed by the device-management security flow before this setting can be changed.");
+                  }}
+                  title="Manage biometric enrollment"
+                  className="rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90"
+                >
                   {(biometricSettings?.biometric_enabled ?? biometricSettings?.biometrics_enabled) === true ? "Disable" : "Enable"}
                 </button>
               </div>
@@ -1289,7 +1296,13 @@ function SecurityPage() {
                   <input
                     type="checkbox"
                     checked={biometricSettings?.transaction_biometrics_enabled === true}
-                    disabled
+                    onChange={(event) => {
+                      setBiometricSettings((previous: any) => ({
+                        ...previous,
+                        transaction_biometrics_enabled: event.target.checked,
+                      }));
+                      toast.info("This selection is displayed locally only until the server-side biometric setting action is connected.");
+                    }}
                     aria-label="Use biometrics for purchases and transfers"
                     className="h-4 w-4 accent-primary"
                   />
