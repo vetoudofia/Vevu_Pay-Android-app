@@ -58,6 +58,8 @@ type BiometricSettingAction =
 
 type BiometricFlowStep = "enroll_key" | "otp";
 
+const BIOMETRIC_PREF_KEY = "vevupay_biometric_login_pref";
+
 function sanitizeErrorMessage(raw: unknown, fallback: string): string {
   if (typeof raw === "string") {
     const trimmed = raw.trim();
@@ -428,6 +430,29 @@ function SecurityPage() {
     setBiometricResendSeconds(0);
   };
 
+  const syncBiometricLoginPref = (
+    action: BiometricSettingAction,
+    activeDeviceId: string,
+  ) => {
+    if (!user?.email) return;
+
+    try {
+      if (action === "biometric_main_enable") {
+        localStorage.setItem(
+          BIOMETRIC_PREF_KEY,
+          JSON.stringify({
+            email: user.email.trim().toLowerCase(),
+            deviceId: activeDeviceId,
+          }),
+        );
+      } else if (action === "biometric_main_disable") {
+        localStorage.removeItem(BIOMETRIC_PREF_KEY);
+      }
+    } catch {
+      // Ignore storage errors.
+    }
+  };
+
   const sendBiometricOtp = async () => {
     if (!user?.email) {
       toast.error("Unable to identify your registered email.");
@@ -566,18 +591,28 @@ function SecurityPage() {
 
       requireSuccess(challengeRes, "Could not start key enrollment.");
 
-      // 2. Prompt Android BiometricPrompt + generate Keystore ECDSA P-256 key & sign
-      const enrolled = await enrollBiometricKey(
+      if (!challengeRes.challenge) {
+        throw new Error("Server did not return an attestation challenge.");
+      }
+
+      const signedMessage =
         challengeRes.signed_message ||
-          [
-            "VEVUPAY-DEVICE-KEY-V1",
-            challengeRes.challenge_id,
-            user?.id,
-            challengeRes.device_record_id,
-            "biometric_enrollment",
-            challengeRes.challenge,
-          ].join("\n"),
-      );
+        [
+          "VEVUPAY-DEVICE-KEY-V1",
+          challengeRes.challenge_id,
+          user?.id,
+          challengeRes.device_record_id,
+          "biometric_enrollment",
+          challengeRes.challenge,
+        ].join("\n");
+
+      // 2. Prompt Android BiometricPrompt + generate Keystore ECDSA P-256 key & sign
+      const enrolled = await enrollBiometricKey({
+        challengeId: challengeRes.challenge_id,
+        challenge: challengeRes.challenge,
+        signedMessage,
+        deviceId,
+      });
 
       // 3. Register public key on backend
       const registerKeyRes = await invokeEdgeFunction("device-management", {
@@ -673,6 +708,8 @@ function SecurityPage() {
         finalizeRes,
         "Could not verify biometric device signature.",
       );
+
+      syncBiometricLoginPref(pendingBiometricAction, deviceId);
 
       if (finalizeRes.settings) {
         setBiometricSettings((prev: any) => ({
