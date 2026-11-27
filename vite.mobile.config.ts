@@ -24,8 +24,10 @@ export default defineConfig({
     // IMPORTANT: Generate the route tree before React processes the app.
     tanstackRouter({
       target: "react",
-      routesDirectory: "./src/routes",
-      generatedRouteTree: "./src/routeTree.gen.ts",
+      // Vite's root is ./mobile, but TanStack routes live in the project-root ./src.
+      // Use absolute paths so the generator never looks for mobile/src/routes.
+      routesDirectory: fileURLToPath(new URL("./src/routes", import.meta.url)),
+      generatedRouteTree: fileURLToPath(new URL("./src/routeTree.gen.ts", import.meta.url)),
       autoCodeSplitting: false,
     }),
 
