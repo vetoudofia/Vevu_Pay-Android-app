@@ -1,4 +1,3 @@
-// src/lib/supabase.ts
 import { createClient, type SupportedStorage } from "@supabase/supabase-js";
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from "@/config/env";
 
@@ -108,89 +107,30 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   },
 });
 
-export async function callEdgeFunction<T = unknown>(
-  name: string,
-  body: Record<string, unknown>
-): Promise<T> {
-  try {
-    const {
-      data: { session },
-      error: sessionError,
-    } = await supabase.auth.getSession();
+export async function getValidAccessToken(): Promise<string> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const {
+    data: { session },
+    error,
+  } = await supabase.auth.getSession();
 
-    if (sessionError || !session?.access_token) {
-      throw new Error("Authentication required. Please log in again.");
+  if (!error && session?.access_token) {
+    const expiresAt = session.expires_at ?? 0;
+    if (expiresAt > nowSeconds + 60) {
+      return session.access_token;
     }
-
-    const response = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-        apikey: SUPABASE_ANON_KEY,
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      let errorMessage = "Something went wrong. Please try again.";
-
-      try {
-        const json = JSON.parse(errorText);
-        errorMessage = json.error || json.message || errorMessage;
-      } catch {
-        console.error(`Edge function ${name} returned non-JSON status ${response.status}`);
-      }
-
-      throw new Error(errorMessage);
-    }
-
-    const data = await response.json();
-
-    if (
-      data &&
-      typeof data === "object" &&
-      "success" in data &&
-      data.success === false
-    ) {
-      throw new Error(data.error || "Edge function returned an error");
-    }
-
-    return data as T;
-  } catch (err: any) {
-    if (err?.message === "Failed to fetch" || err?.name === "TypeError") {
-      throw new Error("Network Error: Please check your internet connection.");
-    }
-    throw err;
-  }
-}
-
-export async function callPublicEdgeFunction<T = unknown>(
-  name: string,
-  body: Record<string, unknown>
-): Promise<T> {
-  const response = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    let errorMessage = "Request failed. Please try again.";
-    try {
-      const text = await response.text();
-      const json = JSON.parse(text);
-      errorMessage = json.error || json.message || errorMessage;
-    } catch {
-      console.error(`Public edge function ${name} returned status ${response.status}`);
-    }
-    throw new Error(errorMessage);
   }
 
-  return (await response.json()) as T;
+  const { data: refreshed, error: refreshError } =
+    await supabase.auth.refreshSession();
+
+  if (!refreshError && refreshed.session?.access_token) {
+    return refreshed.session.access_token;
+  }
+
+  if (session?.access_token) {
+    return session.access_token;
+  }
+
+  throw new Error("Your session is invalid or expired. Please sign in again.");
 }
