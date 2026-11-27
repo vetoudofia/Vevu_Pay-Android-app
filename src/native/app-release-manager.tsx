@@ -156,7 +156,15 @@ export function AppReleaseManager() {
         },
       });
       if (error) throw error;
-      if (data?.success && data.update_available && data.release) {
+      // Never present an APK whose version is already installed. This also
+      // protects users if stale release metadata is returned by the API.
+      if (
+        data?.success &&
+        data.update_available &&
+        data.release &&
+        Number.isSafeInteger(data.release.version_code) &&
+        data.release.version_code > appInfo.versionCode
+      ) {
         setDismissedReleaseId((previous) => previous === data.release?.id ? previous : null);
         setRelease(data.release);
         setMandatory(data.mandatory_update === true);
