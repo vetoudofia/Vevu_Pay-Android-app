@@ -1,6 +1,14 @@
 import { createClient, type SupportedStorage } from "@supabase/supabase-js";
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from "@/config/env";
 
+export interface EdgeFunctionResult<T = any> {
+  success: boolean;
+  message?: string;
+  error?: string;
+  data?: T;
+  [key: string]: any;
+}
+
 const memoryStorage = new Map<string, string>();
 
 function getAvailableStorage(): Storage | null {
@@ -133,4 +141,122 @@ export async function getValidAccessToken(): Promise<string> {
   }
 
   throw new Error("Your session is invalid or expired. Please sign in again.");
+}
+
+export async function callEdgeFunction<T = any>(
+  name: string,
+  body: Record<string, any>
+): Promise<EdgeFunctionResult<T>> {
+  try {
+    const accessToken = await getValidAccessToken();
+    const { data, error } = await supabase.functions.invoke(name, {
+      body,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        apikey: SUPABASE_ANON_KEY,
+      },
+    });
+
+    if (error) {
+      let responseBody: any = null;
+      try {
+        const context = (error as any)?.context;
+        if (context && typeof context.clone === "function") {
+          responseBody = await context.clone().json();
+        } else if (context && typeof context.json === "function") {
+          responseBody = await context.json();
+        }
+      } catch {
+        try {
+          const context = (error as any)?.context;
+          if (context && typeof context.clone === "function") {
+            responseBody = await context.clone().text();
+          }
+        } catch {
+          responseBody = null;
+        }
+      }
+
+      if (typeof responseBody === "string") {
+        try {
+          responseBody = JSON.parse(responseBody);
+        } catch {
+          responseBody = { message: responseBody };
+        }
+      }
+
+      const message =
+        responseBody?.message ||
+        responseBody?.error ||
+        error.message ||
+        "An unexpected server error occurred.";
+
+      return {
+        success: false,
+        message,
+        error: message,
+        status: (error as any)?.context?.status || null,
+        details: responseBody,
+      };
+    }
+
+    if (data?.success === false) {
+      const message =
+        data.message ||
+        data.error ||
+        "The requested operation failed.";
+
+      return {
+        success: false,
+        message,
+        error: message,
+        details: data,
+      };
+    }
+
+    return {
+      success: true,
+      ...data,
+    };
+  } catch (err: any) {
+    const message =
+      err?.message === "Failed to fetch" || err?.name === "TypeError"
+        ? "Network Error: Please check your internet connection."
+        : err?.message || "Unable to connect to the server.";
+
+    return {
+      success: false,
+      message,
+      error: message,
+    };
+  }
+}
+
+export async function callPublicEdgeFunction<T = unknown>(
+  name: string,
+  body: Record<string, unknown>
+): Promise<T> {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    let errorMessage = "Request failed. Please try again.";
+    try {
+      const text = await response.text();
+      const json = JSON.parse(text);
+      errorMessage = json.error || json.message || errorMessage;
+    } catch {
+      console.error(`Public edge function ${name} returned status ${response.status}`);
+    }
+    throw new Error(errorMessage);
+  }
+
+  return (await response.json()) as T;
 }
