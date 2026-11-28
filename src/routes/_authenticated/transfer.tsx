@@ -663,6 +663,8 @@ function TransferPage() {
 
   const handleAmountChange = (rawValue: string) => {
     setLimitNotice(null);
+    setRequestKey(null);
+    setTransferId(null);
 
     if (rawValue === "") {
       setAmount("");
@@ -928,7 +930,8 @@ function TransferPage() {
 
   const submitTransferAuthorization = async (
     biometricAuth: TransactionBiometricAuthorization | null,
-    pinValue: string
+    pinValue: string,
+    activeRequestKey: string
   ): Promise<boolean> => {
     if (!verifiedRecipient) {
       toast.error("Please verify the recipient Vevu ID again.");
@@ -966,11 +969,6 @@ function TransferPage() {
       return false;
     }
 
-    const currentRequestKey = requestKey || crypto.randomUUID();
-    if (!requestKey) {
-      setRequestKey(currentRequestKey);
-    }
-
     const activeRecipient = verifiedRecipient;
     const cleanNarration = (note.trim() || "Peer-to-peer wallet transfer").slice(
       0,
@@ -985,7 +983,7 @@ function TransferPage() {
           amount: numAmount,
           narration: cleanNarration,
           transactionPin: biometricAuth ? "" : pinValue,
-          requestKey: currentRequestKey,
+          requestKey: activeRequestKey,
           ...(biometricAuth ?? {}),
         },
       }
@@ -1048,7 +1046,11 @@ function TransferPage() {
 
     setLoading(true);
     try {
-      await submitTransferAuthorization(null, pin);
+      const activeRequestKey = requestKey || crypto.randomUUID();
+      if (!requestKey) {
+        setRequestKey(activeRequestKey);
+      }
+      await submitTransferAuthorization(null, pin, activeRequestKey);
     } catch {
       toast.error("An unexpected error occurred while authorizing the transfer.");
     } finally {
@@ -1064,9 +1066,9 @@ function TransferPage() {
     setBiometricError("");
 
     try {
-      const currentRequestKey = requestKey || crypto.randomUUID();
+      const activeRequestKey = requestKey || crypto.randomUUID();
       if (!requestKey) {
-        setRequestKey(currentRequestKey);
+        setRequestKey(activeRequestKey);
       }
 
       const numAmount = Number(amount);
@@ -1083,7 +1085,7 @@ function TransferPage() {
       const canonical = JSON.stringify([
         "VEVUPAY-TRANSFER-AUTH-V1",
         authData.user.id,
-        currentRequestKey,
+        activeRequestKey,
         Math.round(numAmount * 100),
         verifiedRecipient.vevu_id.trim(),
         narration,
@@ -1093,12 +1095,16 @@ function TransferPage() {
       const authorization = await authorizeTransactionWithBiometric({
         deviceId: biometricDeviceId,
         transactionType: "transfer",
-        transactionReference: currentRequestKey,
+        transactionReference: activeRequestKey,
         transactionPayloadHash: payloadHash,
       });
 
       setBiometricAuthorization(authorization);
-      const ok = await submitTransferAuthorization(authorization, "");
+      const ok = await submitTransferAuthorization(
+        authorization,
+        "",
+        activeRequestKey
+      );
       if (!ok) {
         setBiometricError(
           "Fingerprint transfer could not be verified. Try again or switch to your 6-digit PIN."
@@ -1422,7 +1428,11 @@ function TransferPage() {
               type="text"
               placeholder="What's this for?"
               value={note}
-              onChange={(e) => setNote(e.target.value)}
+              onChange={(e) => {
+                setNote(e.target.value);
+                setRequestKey(null);
+                setTransferId(null);
+              }}
               className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500 text-sm shadow-inner"
               maxLength={100}
             />
