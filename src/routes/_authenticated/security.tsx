@@ -17,8 +17,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
-import { supabase } from "@/lib/supabase";
-import { callEdgeFunction } from "@/lib/edge-function";
+import { callEdgeFunction } from "@/lib/supabase";
 import {
   checkNativeBiometric,
   isNativeAndroid,
@@ -130,65 +129,22 @@ async function getEdgeErrorMessage(
   return fallback;
 }
 
-async function ensureFreshSessionToken(): Promise<string> {
-  const { data: currentData } = await supabase.auth.getSession();
-  const currentSession = currentData?.session;
-  const nowSeconds = Math.floor(Date.now() / 1000);
-
-  if (
-    currentSession?.access_token &&
-    typeof currentSession.expires_at === "number" &&
-    currentSession.expires_at > nowSeconds + 60
-  ) {
-    return currentSession.access_token;
-  }
-
-  const { data: refreshed, error: refreshError } =
-    await supabase.auth.refreshSession();
-
-  if (!refreshError && refreshed?.session?.access_token) {
-    return refreshed.session.access_token;
-  }
-
-  if (currentSession?.access_token) {
-    return currentSession.access_token;
-  }
-
-  throw new Error("Your session is invalid or expired. Please sign in again.");
-}
-
 async function invokeEdgeFunction(
   functionName: string,
   body: Record<string, any>,
-  options?: { requireFreshToken?: boolean },
+  _options?: { requireFreshToken?: boolean },
 ): Promise<any> {
-  const invokeOptions: {
-    body: Record<string, any>;
-    headers?: Record<string, string>;
-  } = { body };
+  const result = await callEdgeFunction(functionName, body);
 
-  if (options?.requireFreshToken) {
-    const accessToken = await ensureFreshSessionToken();
-    invokeOptions.headers = {
-      Authorization: `Bearer ${accessToken}`,
-    };
-  }
-
-  const { data, error } = await supabase.functions.invoke(
-    functionName,
-    invokeOptions,
-  );
-
-  if (error) {
-    const message = await getEdgeErrorMessage(
-      error,
-      `Unable to complete ${functionName.replace(/-/g, " ")}.`,
+  if (!result.success) {
+    throw new Error(
+      result.message ||
+        result.error ||
+        `Unable to complete ${functionName.replace(/-/g, " ")}.`,
     );
-
-    throw new Error(message);
   }
 
-  return data;
+  return result;
 }
 
 function requireSuccess(data: any, fallback: string) {
