@@ -1,4 +1,5 @@
-import { supabase } from "@/lib/supabase";
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from "@/config/env";
+import { getValidAccessToken, supabase } from "@/lib/supabase";
 
 export interface EdgeFunctionResult<T = any> {
   success: boolean;
@@ -61,10 +62,14 @@ export async function callEdgeFunction<T = any>(
   body: Record<string, any>
 ): Promise<EdgeFunctionResult<T>> {
   try {
-    const { data, error } = await supabase.functions.invoke(
-      functionName,
-      { body }
-    );
+    const accessToken = await getValidAccessToken();
+    const { data, error } = await supabase.functions.invoke(functionName, {
+      body,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        apikey: SUPABASE_ANON_KEY,
+      },
+    });
 
     if (error) {
       return await extractErrorResponse(error);
@@ -100,4 +105,31 @@ export async function callEdgeFunction<T = any>(
   }
 }
 
-export const callPublicEdgeFunction = callEdgeFunction;
+export async function callPublicEdgeFunction<T = unknown>(
+  name: string,
+  body: Record<string, unknown>
+): Promise<T> {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    let errorMessage = "Request failed. Please try again.";
+    try {
+      const text = await response.text();
+      const json = JSON.parse(text);
+      errorMessage = json.error || json.message || errorMessage;
+    } catch {
+      console.error(`Public edge function ${name} returned status ${response.status}`);
+    }
+    throw new Error(errorMessage);
+  }
+
+  return (await response.json()) as T;
+}
