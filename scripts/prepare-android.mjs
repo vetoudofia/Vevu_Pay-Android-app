@@ -1,5 +1,5 @@
-import { access, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { access, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 
 const root = process.cwd();
 const androidRoot = resolve(root, "android");
@@ -22,9 +22,10 @@ if (!(await exists(androidRoot))) {
 }
 
 await mkdir(javaTarget, { recursive: true });
-for (const file of ["MainActivity.java", "VevuPayBiometricPlugin.java", "VevuPayUpdaterPlugin.java"]) {
+for (const file of ["MainActivity.java", "VevuPayBiometricPlugin.java"]) {
   await copyFile(resolve(javaSource, file), resolve(javaTarget, file));
 }
+await rm(resolve(javaTarget, "VevuPayUpdaterPlugin.java"), { force: true });
 
 // Add the AndroidX biometric library required by the native plugin (idempotent).
 let gradle = await readFile(gradleFile, "utf8");
@@ -40,23 +41,29 @@ if (!gradle.includes("androidx.biometric:biometric")) {
   await writeFile(gradleFile, gradle);
 }
 
-// Copy the private-storage FileProvider paths used by the native APK updater.
-const updaterXmlSource = resolve(root, "native/android/app/src/main/res/xml/vevupay_file_paths.xml");
-const updaterXmlTarget = resolve(androidRoot, "app/src/main/res/xml/vevupay_file_paths.xml");
-await mkdir(dirname(updaterXmlTarget), { recursive: true });
-await copyFile(updaterXmlSource, updaterXmlTarget);
+// Remove leftover updater FileProvider XML if present from earlier builds.
+await rm(resolve(androidRoot, "app/src/main/res/xml/vevupay_file_paths.xml"), {
+  force: true,
+});
 
-// Register a narrowly scoped FileProvider for APKs in the app-private cache directory.
-let updaterManifest = await readFile(manifestFile, "utf8");
-if (!updaterManifest.includes('android:name="androidx.core.content.FileProvider"')) {
-  const provider = `\n        <provider\n            android:name="androidx.core.content.FileProvider"\n            android:authorities="\${applicationId}.fileprovider"\n            android:exported="false"\n            android:grantUriPermissions="true">\n            <meta-data\n                android:name="android.support.FILE_PROVIDER_PATHS"\n                android:resource="@xml/vevupay_file_paths" />\n        </provider>`;
-  updaterManifest = updaterManifest.replace(/<application\b[^>]*>/, (match) => `${match}${provider}`);
-  await writeFile(manifestFile, updaterManifest);
-}
-
-// Add runtime biometric & APK installation permissions (idempotent).
+// Clean up updater FileProvider and REQUEST_INSTALL_PACKAGES; ensure USE_BIOMETRIC is present.
 let manifest = await readFile(manifestFile, "utf8");
 let manifestChanged = false;
+
+const providerRegex =
+  /\s*<provider\s+android:name="androidx\.core\.content\.FileProvider"[\s\S]*?<\/provider>/g;
+if (providerRegex.test(manifest)) {
+  manifest = manifest.replace(providerRegex, "");
+  manifestChanged = true;
+}
+
+const installPermRegex =
+  /\s*<uses-permission\s+android:name="android\.permission\.REQUEST_INSTALL_PACKAGES"\s*\/>/g;
+if (installPermRegex.test(manifest)) {
+  manifest = manifest.replace(installPermRegex, "");
+  manifestChanged = true;
+}
+
 if (!manifest.includes("android.permission.USE_BIOMETRIC")) {
   manifest = manifest.replace(
     /<manifest\b[^>]*>/,
@@ -64,20 +71,12 @@ if (!manifest.includes("android.permission.USE_BIOMETRIC")) {
   );
   manifestChanged = true;
 }
-if (!manifest.includes("android.permission.REQUEST_INSTALL_PACKAGES")) {
-  manifest = manifest.replace(
-    /<manifest\b[^>]*>/,
-    (match) =>
-      `${match}\n    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />`,
-  );
-  manifestChanged = true;
-}
+
 if (manifestChanged) {
   await writeFile(manifestFile, manifest);
 }
 
-// Apply the release identity used by the in-app updater. Always increment
-// VITE_APP_VERSION_CODE for each Android release; Android forbids downgrading it.
+// Apply the release version metadata.
 // GitHub Actions writes Vite variables to .env.production.local. Vite reads
 // that file automatically, but Node scripts do not, so load it explicitly.
 const productionEnvPath = resolve(root, ".env.production.local");
@@ -141,5 +140,5 @@ if (await exists(firebaseSource)) {
 }
 
 console.log(
-  "VevuPay Android native source, biometric dependency, updater FileProvider, permissions and Firebase config prepared.",
+  "VevuPay Android native biometric setup, version metadata and Firebase config prepared (APK auto-update removed).",
 );
